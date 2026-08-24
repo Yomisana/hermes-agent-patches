@@ -1,0 +1,29 @@
+{
+  "issueReferences": [
+    76932
+  ],
+  "pullRequest": 78423,
+  "pullRequestUrl": "https://github.com/NousResearch/hermes-agent/pull/78423",
+  "pullRequestAuthor": "himanusia",
+  "title": "feat(dashboard): scope isolated dashboards to launched profile",
+  "stateAtImport": "open",
+  "mergedAtImport": false,
+  "baseSha": "f5be9236e00ddf2f2a412697f267078fc4ee068e",
+  "headSha": "d47c9fa59bd03615c2eff57550686d65c2d9b443",
+  "patchFile": "patches/candidates/76932-profile-session-isolation-alt-78423-pr-78423.patch",
+  "patchSha256": "665f312e2d7f63528f45a6fe4730eda89d64bee90f0149386cf4a9693b12cd1e",
+  "importedForReview": true,
+  "enabled": false,
+  "checkedBaseSha": "fcbd1076a93841fa88855acce810e342a5b78101",
+  "appliesCleanlyToPinnedBase": false,
+  "applyCheckError": [
+    "error: patch failed: hermes_cli/web_routers/profiles.py:93",
+    "error: hermes_cli/web_routers/profiles.py: patch does not apply",
+    "error: patch failed: hermes_cli/web_server.py:2905",
+    "error: hermes_cli/web_server.py: patch does not apply",
+    "error: patch failed: tests/hermes_cli/test_web_server_profile_unification.py:50",
+    "error: tests/hermes_cli/test_web_server_profile_unification.py: patch does not apply",
+    "error: patch failed: web/src/i18n/en.ts:94",
+    "error: web/src/i18n/en.ts: patch does not apply"
+  ]
+}

@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1.7
+ARG UPSTREAM_IMAGE
+FROM ${UPSTREAM_IMAGE}
+
+ARG UPSTREAM_SOURCE_SHA
+ARG BACKPORT_VERSION
+
+USER root
+COPY --chown=0:0 --chmod=0555 rootfs/ /
+
+LABEL org.opencontainers.image.source="https://github.com/Yomisana/hermes-agent-patches" \
+      org.opencontainers.image.revision="${UPSTREAM_SOURCE_SHA}" \
+      io.yomisana.hermes.backport-version="${BACKPORT_VERSION}" \
+      io.yomisana.hermes.upstream-image="${UPSTREAM_IMAGE}"
+
+# Keep the official image's root entrypoint contract. Its s6 stage2 hook is
+# responsible for dropping service processes to the hermes user.
+

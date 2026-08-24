@@ -1,0 +1,30 @@
+name: verify-backport-project
+
+on:
+  pull_request: {}
+  push:
+    branches: [master, main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Validate manifest and Python tools
+        run: |
+          python scripts/patchctl.py validate
+          python -m compileall -q scripts tests
+          python -m unittest discover -s tests -v
+      - name: Check that public files contain no obvious private deployment values
+        run: |
+          if grep -RIE '(BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY|https?://[^ ]+\.internal)' \
+            --exclude-dir=.git --exclude='*.patch' .; then
+            echo 'Possible private deployment value found'; exit 1
+          fi

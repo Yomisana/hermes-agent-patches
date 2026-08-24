@@ -1,0 +1,23 @@
+{
+  "issueReferences": [
+    76932
+  ],
+  "pullRequest": 71037,
+  "pullRequestUrl": "https://github.com/NousResearch/hermes-agent/pull/71037",
+  "pullRequestAuthor": "webtecnica",
+  "title": "feat(dashboard): add proper access-control boundary for --isolated mode (#70867)",
+  "stateAtImport": "open",
+  "mergedAtImport": false,
+  "baseSha": "759f68bc25e528945f61b5f29eca4c9cbfaa6633",
+  "headSha": "ab9026e94901a93f7719fc24c776d4308b46df16",
+  "patchFile": "patches/candidates/76932-profile-session-isolation-alt-71037-pr-71037.patch",
+  "patchSha256": "05ea1382ba099e45dc4993ba831165b71eb91f5b7dd50355b214182a4e399356",
+  "importedForReview": true,
+  "enabled": false,
+  "checkedBaseSha": "fcbd1076a93841fa88855acce810e342a5b78101",
+  "appliesCleanlyToPinnedBase": false,
+  "applyCheckError": [
+    "error: patch failed: hermes_cli/web_server.py:11707",
+    "error: hermes_cli/web_server.py: patch does not apply"
+  ]
+}

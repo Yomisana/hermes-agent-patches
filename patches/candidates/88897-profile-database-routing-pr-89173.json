@@ -1,0 +1,23 @@
+{
+  "issueReferences": [
+    88897
+  ],
+  "pullRequest": 89173,
+  "pullRequestUrl": "https://github.com/NousResearch/hermes-agent/pull/89173",
+  "pullRequestAuthor": "ayushnangia",
+  "title": "fix(gateway): a profile-scoped process resolves 'default' to its launch profile",
+  "stateAtImport": "open",
+  "mergedAtImport": false,
+  "baseSha": "a9a4a040705f0c312488e81dbdd96bf0b951feb7",
+  "headSha": "fab84c58873c6b259c31da2f11797f04ff5d3cd3",
+  "patchFile": "patches/candidates/88897-profile-database-routing-pr-89173.patch",
+  "patchSha256": "aacfddad1ef975f72f4f2afb64503e112a3d31eaffb8bdc3e4ca1f42639d1c26",
+  "importedForReview": true,
+  "enabled": false,
+  "checkedBaseSha": "fcbd1076a93841fa88855acce810e342a5b78101",
+  "appliesCleanlyToPinnedBase": false,
+  "applyCheckError": [
+    "error: patch failed: tui_gateway/server.py:149",
+    "error: tui_gateway/server.py: patch does not apply"
+  ]
+}

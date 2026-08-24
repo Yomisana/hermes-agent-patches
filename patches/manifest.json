@@ -1,0 +1,42 @@
+{
+  "schemaVersion": 1,
+  "patches": [
+    {
+      "id": "76932-profile-session-isolation",
+      "issues": [76932],
+      "candidatePullRequests": [77125, 78423, 71037, 48652],
+      "selectedPullRequest": null,
+      "sourceHeadSha": null,
+      "files": [],
+      "patchSha256": null,
+      "status": "candidate-review-required",
+      "enabled": false,
+      "note": "Overlapping implementations exist. Select one reviewed approach; never apply all candidates automatically."
+    },
+    {
+      "id": "88897-profile-database-routing",
+      "issues": [88897],
+      "candidatePullRequests": [89173],
+      "selectedPullRequest": null,
+      "sourceHeadSha": null,
+      "files": [],
+      "patchSha256": null,
+      "status": "candidate-review-required",
+      "enabled": false,
+      "note": "Upstream PR exists but remains unmerged at the recorded snapshot."
+    },
+    {
+      "id": "91330-profile-write-boundary",
+      "issues": [91330],
+      "candidatePullRequests": [91345, 91381],
+      "selectedPullRequest": null,
+      "sourceHeadSha": null,
+      "files": [],
+      "patchSha256": null,
+      "status": "candidate-review-required",
+      "enabled": false,
+      "note": "Competing PRs exist. The broader candidate may still leave aggregate endpoints uncovered."
+    }
+  ]
+}
+

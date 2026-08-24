@@ -1,0 +1,116 @@
+From ab9026e94901a93f7719fc24c776d4308b46df16 Mon Sep 17 00:00:00 2001
+From: webtecnica <webtecnica@users.noreply.github.com>
+Date: Fri, 24 Jul 2026 18:37:27 -0300
+Subject: [PATCH] feat(dashboard): add proper access-control boundary for
+ --isolated mode (#70867)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+When the dashboard is launched with --isolated, the API must reject
+?profile= requests targeting any profile other than the one the server
+is scoped to. Without this guard, a user on an isolated dashboard could
+read/write another profile's config, sessions, skills, and env vars
+simply by passing ?profile=<other>.
+
+Changes:
+- Add _check_isolated_profile_access() helper that compares the
+  requested profile directory against the server's own HERMES_HOME
+- Wire the check into _profile_scope(), _config_profile_scope(), and
+  _open_session_db_for_profile() — the three gateways through which all
+  profile-scoped API requests pass
+- Add 'isolated' parameter to start_server() and store it on app.state
+- Forward the CLI --isolated flag from cmd_dashboard to start_server()
+
+Closes: #70867
+---
+ hermes_cli/main.py       |  1 +
+ hermes_cli/web_server.py | 28 ++++++++++++++++++++++++++++
+ 2 files changed, 29 insertions(+)
+
+diff --git a/hermes_cli/main.py b/hermes_cli/main.py
+index 95bca3408d07..69e9964ce3ec 100644
+--- a/hermes_cli/main.py
++++ b/hermes_cli/main.py
+@@ -14722,6 +14722,7 @@ def cmd_dashboard(args):
+         allow_public=getattr(args, "insecure", False),
+         initial_profile=getattr(args, "open_profile", "") or "",
+         headless=_headless_backend,
++        isolated=getattr(args, "isolated", False),
+         ssh_session_token=_ssh_session_token,
+         ssh_owner_nonce=_ssh_owner_nonce,
+     )
+diff --git a/hermes_cli/web_server.py b/hermes_cli/web_server.py
+index 5ae0010ca472..9e16444d1ea4 100644
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -11707,6 +11707,7 @@ def _open_session_db_for_profile(profile: Optional[str]):
+     from hermes_state import SessionDB
+     if not profile:
+         return SessionDB()
++    _check_isolated_profile_access(profile)
+     _name, home = _cron_profile_home(profile)
+     return SessionDB(db_path=Path(home) / "state.db")
+ 
+@@ -15546,6 +15547,7 @@ def _profile_scope(profile: Optional[str]):
+     imported the modules before a HERMES_HOME override, or under test
+     isolation).
+     """
++    _check_isolated_profile_access(profile)
+     requested = (profile or "").strip()
+ 
+     from hermes_constants import (
+@@ -15599,6 +15601,7 @@ def _config_profile_scope(profile: Optional[str]):
+ 
+     None/""/"current" means the dashboard's own profile — no override.
+     """
++    _check_isolated_profile_access(profile)
+     requested = (profile or "").strip()
+     if not requested or requested.lower() == "current":
+         yield None
+@@ -15617,6 +15620,29 @@ def _config_profile_scope(profile: Optional[str]):
+         reset_hermes_home_override(token)
+ 
+ 
++def _check_isolated_profile_access(profile: Optional[str]) -> None:
++    if not getattr(app.state, "isolated", False):
++        return
++    requested = (profile or "").strip()
++    if not requested or requested.lower() == "current":
++        return
++    from hermes_constants import get_hermes_home
++
++    isolated_home = Path(str(get_hermes_home()))
++    try:
++        requested_dir = _resolve_profile_dir(requested)
++    except HTTPException:
++        return
++    if requested_dir.resolve() != isolated_home.resolve():
++        raise HTTPException(
++            status_code=403,
++            detail=(
++                "Isolated mode: profile '" + requested + "' is not accessible. "
++                "This dashboard is scoped to its own profile only."
++            ),
++        )
++
++
+ class SkillToggle(BaseModel):
+     name: str
+     enabled: bool
+@@ -20021,6 +20047,7 @@ def start_server(
+     allow_public: bool = False,
+     initial_profile: str = "",
+     headless: bool = False,
++    isolated: bool = False,
+     ssh_session_token: Optional[str] = None,
+     ssh_owner_nonce: Optional[str] = None,
+ ):
+@@ -20055,6 +20082,7 @@ def start_server(
+     # uses this to decide whether to refuse the bind, log the gate-on
+     # banner, and enable uvicorn proxy_headers.
+     app.state.auth_required = should_require_auth(host)
++    app.state.isolated = isolated
+ 
+     # ``--insecure`` no longer disables the auth gate (June 2026 hardening:
+     # the hermes-0day MCP-persistence campaign abused unauthenticated public

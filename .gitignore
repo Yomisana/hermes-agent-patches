@@ -1,0 +1,8 @@
+.local/
+.work/
+dist/
+__pycache__/
+*.pyc
+*.log
+upstream-status.json
+
