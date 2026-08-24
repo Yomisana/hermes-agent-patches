@@ -21,7 +21,16 @@ def load_json(path: Path) -> dict:
 
 def run(args: list[str], cwd: Path, capture: bool = False) -> str:
     if args and args[0] == "git":
-        args = ["git", "-c", f"safe.directory={cwd.as_posix()}", *args[1:]]
+        args = [
+            "git",
+            "-c",
+            f"safe.directory={cwd.as_posix()}",
+            "-c",
+            "user.name=Hermes Backport Builder",
+            "-c",
+            "user.email=backport-builder@users.noreply.github.com",
+            *args[1:],
+        ]
     result = subprocess.run(
         args, cwd=cwd, check=True, text=True,
         stdout=subprocess.PIPE if capture else None,
