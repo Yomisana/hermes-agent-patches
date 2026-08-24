@@ -100,7 +100,7 @@ jobs:
           RELEASE_NOTES: ${{ inputs.release_notes }}
         run: |
           cp upstream.json patches/manifest.json dist/
-          cp -R patches/enabled dist/enabled-patches 2>/dev/null || true
+          cp patches/enabled/*.patch dist/
           python scripts/watch_upstream.py
           cp upstream-status.json dist/
           python - <<'PY'
