@@ -91,7 +91,9 @@ jobs:
             --build-arg BACKPORT_VERSION='${{ steps.version.outputs.backport }}' \
             -t 'hermes-agent:${{ steps.version.outputs.tag }}' .work/overlay
           docker run --rm 'hermes-agent:${{ steps.version.outputs.tag }}' --version
-          docker save 'hermes-agent:${{ steps.version.outputs.tag }}' | gzip -9 > \
+          # Docker layer blobs are already compressed; level 1 avoids spending
+          # several CI minutes for negligible additional size reduction.
+          docker save 'hermes-agent:${{ steps.version.outputs.tag }}' | gzip -1 > \
             'dist/hermes-agent-${{ steps.version.outputs.tag }}-linux-amd64.docker.tar.gz'
 
       - name: Package provenance and checksums
