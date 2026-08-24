@@ -2,7 +2,7 @@
 
 這是一個把 [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) 既有 Issue／PR 修正整理成可重現、可驗證、可離線使用之暫時性 backport 的工具專案。
 
-本專案不是 Hermes Agent fork，也不宣稱擁有所收錄的修正。Issue、PR、原始修改與 commit 作者都屬於各自的上游貢獻者；本專案負責保存來源與作者資訊、鎖定版本及 SHA、驗證修正，並產生方便內網使用的 patch、wheel/source 與 Container 離線產物。
+本專案不是 Hermes Agent fork，也不宣稱擁有所收錄的修正。Issue、PR、原始修改與 commit 作者都屬於各自的上游貢獻者；本專案負責保存來源與作者資訊、鎖定版本及 SHA、驗證修正，並產生方便內網使用的 patch、patched source 與 Container 離線產物。
 
 ## 解決的環境限制
 
@@ -10,7 +10,7 @@
 GitHub / NousResearch（外網）
           │ GitHub Actions 監看、驗證、打包
           ▼
-GitHub Draft Release：patch + wheel + source + Docker archive
+GitHub Draft Release：patch + patched source + Docker archive
           │ 由可連外的 Windows 電腦下載並帶入內網
           ▼
 GitBucket → Harbor → Rancher
@@ -20,10 +20,10 @@ GitBucket → Harbor → Rancher
 
 ## 兩種使用方式，一份補丁來源
 
-- 非 Docker：使用 CI 從相同 patched source 建立的 Python wheel 或 source archive；建議裝在獨立 venv。
+- 非 Docker：使用 CI 建立的 patched source archive，依上游支援方式用 `uv sync` 或 editable install 執行；建議使用獨立環境。
 - Docker／Podman／Rancher：使用鎖定官方 image digest 的衍生 image，或將 CI 輸出的 Docker archive 匯入 Harbor。
 
-直接由官方 `install.sh` 安裝的 Hermes 不會自動取得本專案補丁。要測試非 Docker backport，必須使用本專案 Release 的 patched wheel/source。
+直接由官方 `install.sh` 安裝的 Hermes 不會自動取得本專案補丁。要測試非 Docker backport，必須使用本專案 Release 的 patched source。Hermes 上游刻意禁止建立 wheel，因此本專案不繞過該限制，也不發布非官方 wheel。
 
 ## 安全原則
 

@@ -70,10 +70,9 @@ jobs:
           uv run pytest tests/test_tui_gateway_server.py -q -k \
             'profile_home_isolated_default_resolves_to_launch_profile or process_is_profile_scoped_detects_scoped_home'
 
-      - name: Build patched wheel and source archive
+      - name: Build patched source archive
         run: |
-          python -m pip install --disable-pip-version-check build
-          python -m build --wheel --outdir "$GITHUB_WORKSPACE/dist" .work/hermes-agent
+          mkdir -p dist
           tar --exclude='.git' -C .work -czf "dist/hermes-agent-${{ steps.version.outputs.tag }}-source.tar.gz" hermes-agent
 
       - name: Prepare fast official-image overlay
