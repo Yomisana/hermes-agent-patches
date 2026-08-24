@@ -63,9 +63,12 @@ jobs:
       - name: Run upstream and backport tests
         run: |
           python -m unittest discover -s tests -v
-          if [ -d tests/regression ] && find tests/regression -type f | grep -q .; then
-            python -m unittest discover -s tests/regression -v
-          fi
+          python -m pip install --disable-pip-version-check uv==0.11.6
+          cd .work/hermes-agent
+          uv sync --frozen --extra dev
+          uv run pytest tests/hermes_cli/test_web_profile_soul_writes.py -q
+          uv run pytest tests/test_tui_gateway_server.py -q -k \
+            'profile_home_isolated_default_resolves_to_launch_profile or process_is_profile_scoped_detects_scoped_home'
 
       - name: Build patched wheel and source archive
         run: |

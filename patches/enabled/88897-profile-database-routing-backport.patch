@@ -1,0 +1,89 @@
+From bb82093fbfad326ee12302c06b622c4cf98604e4 Mon Sep 17 00:00:00 2001
+From: Yomisana <93663341+Yomisana@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 14:41:40 +0800
+Subject: [PATCH] fix(backport): keep default sessions in scoped profile
+
+Minimal v2026.8.19 adaptation of the behavior and focused tests authored by Ayush Nangia in upstream PR #89173. Covers issue #88897 without importing unrelated formatting drift.
+
+Upstream-PR: https://github.com/NousResearch/hermes-agent/pull/89173
+
+Original-fix-by: Ayush Nangia <ayushnangia16@gmail.com>
+---
+ tests/test_tui_gateway_server.py | 34 ++++++++++++++++++++++++++++++++
+ tui_gateway/server.py            | 15 ++++++++++++++
+ 2 files changed, 49 insertions(+)
+
+diff --git a/tests/test_tui_gateway_server.py b/tests/test_tui_gateway_server.py
+index 2f15a65..8a07767 100644
+--- a/tests/test_tui_gateway_server.py
++++ b/tests/test_tui_gateway_server.py
+@@ -19830,3 +19830,37 @@ def test_workspace_move_rehomes_running_session(monkeypatch, tmp_path):
+     assert captured["row_update"] == (target, str(new_cwd))
+     assert live["cwd"] == str(new_cwd)
+     assert live.get("explicit_cwd") is True
++
++
++def test_profile_home_isolated_default_resolves_to_launch_profile(
++    monkeypatch, tmp_path
++):
++    """#88897/#89173: profile=default from Desktop stays in the named
++    profile served by a profile-scoped process."""
++    from hermes_cli import profiles as profiles_mod
++
++    machine_root = tmp_path / "machine-root"
++    isolated_home = tmp_path / "profiles" / "testuser"
++    machine_root.mkdir(parents=True)
++    isolated_home.mkdir(parents=True)
++    monkeypatch.setattr(server, "_hermes_home", str(isolated_home))
++    monkeypatch.setattr(profiles_mod, "get_profile_dir", lambda _name: str(machine_root))
++    monkeypatch.setattr(server, "_process_is_profile_scoped", lambda: True)
++
++    assert server._profile_home("default") is None
++
++    monkeypatch.setattr(server, "_process_is_profile_scoped", lambda: False)
++    assert server._profile_home("default") == machine_root
++
++
++def test_process_is_profile_scoped_detects_scoped_home(monkeypatch, tmp_path):
++    root = tmp_path / "root"
++    root.mkdir()
++    monkeypatch.setattr(server, "_hermes_home", str(root))
++    monkeypatch.setattr("hermes_constants.get_default_hermes_root", lambda: root)
++    assert server._process_is_profile_scoped() is False
++
++    scoped = root / "profiles" / "coder"
++    scoped.mkdir(parents=True)
++    monkeypatch.setattr(server, "_hermes_home", str(scoped))
++    assert server._process_is_profile_scoped() is True
+diff --git a/tui_gateway/server.py b/tui_gateway/server.py
+index 00fe114..4bcc734 100644
+--- a/tui_gateway/server.py
++++ b/tui_gateway/server.py
+@@ -1534,9 +1534,24 @@ def _profile_home(profile: str | None) -> Path | None:
+     # Already the launch profile? No override needed.
+     if home.resolve() == Path(_hermes_home).resolve():
+         return None
++    # Backport of upstream PR #89173 for issue #88897. A process launched
++    # inside a named profile must interpret Desktop's legacy ``profile=default``
++    # as its own launch profile, not the machine root's default profile.
++    if name == "default" and _process_is_profile_scoped():
++        return None
+     return home if (home / "state.db").exists() or home.exists() else None
+ 
+ 
++def _process_is_profile_scoped() -> bool:
++    """True when this process's HERMES_HOME is not the machine root."""
++    try:
++        from hermes_constants import get_default_hermes_root
++
++        return Path(_hermes_home).resolve() != Path(get_default_hermes_root()).resolve()
++    except Exception:
++        return False
++
++
+ def _profile_scoped(handler):
+     """Bind ``params['profile']``'s HERMES_HOME around a handler.
+ 
+-- 
+2.55.0.windows.4
+

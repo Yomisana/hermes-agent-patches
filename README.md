@@ -38,7 +38,9 @@ GitBucket → Harbor → Rancher
 
 ## 目前狀態
 
-初始 manifest 只記錄同事提供的安全問題與既有候選 PR，全部為 `enabled: false`。這是刻意的安全預設：尚未完成逐份 diff review 與 regression tests 前，不產生宣稱已修正的 production image。
+第一版已啟用三組經比對的 backport：Issue #91330 選用較完整的 PR #91381；Issue #76932 依 PR #77125 的修正方向製作相容於鎖定版本的 adaptation；Issue #88897 依 PR #89173 製作最小 adaptation。原始候選 mbox、作者、head SHA、選擇理由及未採用的重疊 PR 都留在 repository 供稽核。
+
+這代表「補丁可重現且測試通過」，不代表上游已合併，也不等於 NousResearch 官方安全公告或正式支援。Release 預設維持 Draft，先供測試環境驗證。
 
 追蹤範圍請看 [上游來源與歸屬](docs/UPSTREAM-PROVENANCE.md)；支援邊界請看 [支援矩陣](docs/SUPPORT-MATRIX.md)。
 

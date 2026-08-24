@@ -90,9 +90,21 @@ def apply(checkout: Path, check_only: bool) -> None:
     verify_checkout(checkout)
     patch_paths = [str((ROOT / item["files"][0]).resolve()) for item in patches]
     if check_only:
-        # git apply validates the diffs without changing the checkout. Actual
-        # installation uses git am so original commit authorship is retained.
-        run(["git", "apply", "--check", *patch_paths], checkout)
+        # Later patches may intentionally depend on earlier ones, so validate
+        # the complete series with the same three-way operation used by apply.
+        # The checkout is known-clean and pinned; restore the exact base after
+        # the temporary commits, even when git-am reports a conflict.
+        before = run(["git", "rev-parse", "HEAD"], checkout, True)
+        try:
+            run(["git", "am", "--3way", *patch_paths], checkout)
+        finally:
+            subprocess.run(
+                ["git", "-c", f"safe.directory={checkout.as_posix()}", "am", "--abort"],
+                cwd=checkout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            run(["git", "reset", "--hard", before], checkout)
         print(f"{len(patch_paths)} patch mbox file(s) apply cleanly")
         return
     before = run(["git", "rev-parse", "HEAD"], checkout, True)
@@ -105,7 +117,8 @@ def apply(checkout: Path, check_only: bool) -> None:
         "commitsOldestFirst": commits,
         "patchIds": [item["id"] for item in patches],
     }
-    state_path = checkout / ".git" / "hermes-backport-applied.json"
+    git_dir = Path(run(["git", "rev-parse", "--absolute-git-dir"], checkout, True))
+    state_path = git_dir / "hermes-backport-applied.json"
     state_path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
     print(f"applied {len(patch_paths)} reviewed patch mbox file(s); recorded {len(commits)} commit(s)")
 
@@ -114,7 +127,8 @@ def reverse(checkout: Path) -> None:
     validate_metadata(require_enabled=True)
     if run(["git", "status", "--porcelain"], checkout, True):
         raise SystemExit("checkout must be clean before reversal")
-    state_path = checkout / ".git" / "hermes-backport-applied.json"
+    git_dir = Path(run(["git", "rev-parse", "--absolute-git-dir"], checkout, True))
+    state_path = git_dir / "hermes-backport-applied.json"
     if not state_path.is_file():
         raise SystemExit("missing .git/hermes-backport-applied.json; refusing to guess which commits to reverse")
     state = json.loads(state_path.read_text(encoding="utf-8"))

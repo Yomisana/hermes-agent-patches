@@ -1,0 +1,154 @@
+From 8d6e2c74c1fc6ee4c25ab8b73f78ccd9de962a7e Mon Sep 17 00:00:00 2001
+From: Yomisana <93663341+Yomisana@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 14:41:40 +0800
+Subject: [PATCH] fix(backport): scope profile enumeration and sessions
+
+Adapt the fix proposed by webtecnica in upstream PR #77125 to the explicit isolation boundary introduced by PR #91381. Covers issue #76932 on v2026.8.19.
+
+Upstream-PR: https://github.com/NousResearch/hermes-agent/pull/77125
+
+Original-fix-by: webtecnica <webtecnica@gmail.com>
+---
+ hermes_cli/web_routers/profiles.py            | 32 +++++++++++--
+ .../test_web_profile_soul_writes.py           | 47 +++++++++++++++++++
+ 2 files changed, 76 insertions(+), 3 deletions(-)
+
+diff --git a/hermes_cli/web_routers/profiles.py b/hermes_cli/web_routers/profiles.py
+index a23e535..01d2547 100644
+--- a/hermes_cli/web_routers/profiles.py
++++ b/hermes_cli/web_routers/profiles.py
+@@ -86,6 +86,19 @@ _write_profile_mcp_servers = late("_write_profile_mcp_servers")
+ _write_profile_model = late("_write_profile_model")
+ 
+ 
++def _isolated_profile_scope() -> Optional[str]:
++    """Return the only profile an explicitly isolated server may expose.
++
++    This is the v2026.8.19 backport adaptation of upstream PR #77125.  Unlike
++    the original candidate, it uses PR #91381's explicit ``--isolated`` state
++    instead of inferring isolation from a non-default profile name.  That also
++    protects an isolated server launched for the default profile.
++    """
++    if not _is_isolated_server():
++        return None
++    return _current_profile_name() or "default"
++
++
+ # Bounded cache lifetime for the expensive sidebar scan. Short enough that the
+ # UI never shows meaningfully stale data, long enough to coalesce the desktop's
+ # reconnect/focus/change poll bursts into one scan.
+@@ -257,7 +270,10 @@ def get_profiles_sessions(
+     from hermes_cli import profiles as profiles_mod
+ 
+     targets: List[Tuple[str, Path]] = []
+-    if profile and profile != "all":
++    scope = _isolated_profile_scope()
++    if scope is not None:
++        targets.append((scope, profiles_mod.get_profile_dir(scope)))
++    elif profile and profile != "all":
+         name, home = _cron_profile_home(profile)
+         targets.append((name, home))
+     else:
+@@ -403,15 +419,19 @@ def get_profiles_sessions_sidebar(
+     """
+     from hermes_cli import profiles as profiles_mod
+ 
++    scope = _isolated_profile_scope()
+     try:
+         # Session aggregation only needs name/path; the lightweight enumerator
+         # avoids YAML/meta/gateway/skill probes for all profiles per refresh.
+         targets: List[Tuple[str, Path]] = profiles_mod.profiles_to_serve(multiplex=True)
++        if scope is not None:
++            targets = [(name, home) for name, home in targets if name == scope]
+     except Exception:
+         _log.exception("GET /api/profiles/sessions/sidebar: list_profiles failed")
+         targets = []
+     if not targets:
+-        targets.append(("default", profiles_mod.get_profile_dir("default")))
++        target_name = scope or "default"
++        targets.append((target_name, profiles_mod.get_profile_dir(target_name)))
+ 
+     recents_scope = (recents_profile or "all").strip() or "all"
+     recents_exclude_list = [s for s in (recents_exclude or "").split(",") if s.strip()]
+@@ -778,13 +798,19 @@ def post_profiles_sessions_pull_requests(body: SessionPrScanBody):
+ @router.get("/api/profiles")
+ async def list_profiles_endpoint():
+     from hermes_cli import profiles as profiles_mod
++    scope = _isolated_profile_scope()
+     try:
+         loop = asyncio.get_running_loop()
+         profiles = await loop.run_in_executor(None, profiles_mod.list_profiles)
++        if scope is not None:
++            profiles = [profile for profile in profiles if profile.name == scope]
+         return {"profiles": [_profile_to_dict(p) for p in profiles]}
+     except Exception:
+         _log.exception("GET /api/profiles failed; falling back to profile directory scan")
+-        return {"profiles": _fallback_profile_dicts(profiles_mod)}
++        profiles = _fallback_profile_dicts(profiles_mod)
++        if scope is not None:
++            profiles = [profile for profile in profiles if profile.get("name") == scope]
++        return {"profiles": profiles}
+ 
+ 
+ @router.post("/api/profiles")
+diff --git a/tests/hermes_cli/test_web_profile_soul_writes.py b/tests/hermes_cli/test_web_profile_soul_writes.py
+index ff2a82c..fe57b9d 100644
+--- a/tests/hermes_cli/test_web_profile_soul_writes.py
++++ b/tests/hermes_cli/test_web_profile_soul_writes.py
+@@ -198,6 +198,53 @@ class TestIsolatedProfileSoulScope:
+ 
+         assert r.status_code == 403, r.text
+ 
++    def test_isolated_profile_list_exposes_only_launch_profile(
++        self, isolated_home, monkeypatch
++    ):
++        """Backport of #76932/#77125: an authenticated isolated dashboard
++        must not enumerate sibling profiles."""
++        with self._client(monkeypatch, isolated=True) as c:
++            r = c.get("/api/profiles")
++
++        assert r.status_code == 200, r.text
++        assert [item["name"] for item in r.json()["profiles"]] == ["alice"]
++
++    def test_isolated_session_aggregation_opens_only_launch_profile_db(
++        self, isolated_home, monkeypatch
++    ):
++        """Backport of #76932/#77125: even profile=all is forced to the
++        isolated launch profile and never opens a sibling state.db."""
++        from hermes_cli import web_server
++
++        for name in ("alice", "bob"):
++            (isolated_home / name / "state.db").write_bytes(b"")
++        opened = []
++
++        class FakeDB:
++            def __init__(self, path):
++                opened.append(Path(path))
++
++            def list_sessions_rich(self, **_kwargs):
++                return []
++
++            def session_count(self, **_kwargs):
++                return 0
++
++            def close(self):
++                pass
++
++        monkeypatch.setattr(
++            web_server,
++            "_open_session_db_at_path",
++            lambda path, read_only=False: FakeDB(path),
++        )
++
++        with self._client(monkeypatch, isolated=True) as c:
++            r = c.get("/api/profiles/sessions?profile=all")
++
++        assert r.status_code == 200, r.text
++        assert opened == [isolated_home / "alice" / "state.db"]
++
+     def test_isolated_default_profile_blocks_named_profiles(
+         self, tmp_path, monkeypatch
+     ):
+-- 
+2.55.0.windows.4
+
