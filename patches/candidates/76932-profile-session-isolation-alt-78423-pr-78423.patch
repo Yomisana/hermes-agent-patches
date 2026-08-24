@@ -1,0 +1,462 @@
+From 90acae8b32e7b6c72f2e5919efb9bc6dadf26adf Mon Sep 17 00:00:00 2001
+From: himanusia <19623185@std.stei.itb.ac.id>
+Date: Tue, 4 Aug 2026 12:20:06 +0700
+Subject: [PATCH 1/4] Scope isolated dashboards to their launched profile
+
+---
+ hermes_cli/main.py                            |  6 ++
+ hermes_cli/web_routers/profiles.py            | 49 ++++++++++++---
+ hermes_cli/web_server.py                      | 61 ++++++++++++++++---
+ .../test_web_server_profile_unification.py    | 30 +++++++++
+ 4 files changed, 130 insertions(+), 16 deletions(-)
+
+diff --git a/hermes_cli/main.py b/hermes_cli/main.py
+index 624d0f10109f..052fc99a5c4c 100644
+--- a/hermes_cli/main.py
++++ b/hermes_cli/main.py
+@@ -10480,6 +10480,12 @@ def cmd_dashboard(args):
+         open_browser=not args.no_open,
+         allow_public=getattr(args, "insecure", False),
+         initial_profile=getattr(args, "open_profile", "") or "",
++        isolated_profile=(
++            _launch_profile
++            if getattr(args, "isolated", False)
++            and _launch_profile not in ("default", "custom")
++            else ""
++        ),
+         headless=_headless_backend,
+         ssh_session_token=_ssh_session_token,
+         ssh_owner_nonce=_ssh_owner_nonce,
+diff --git a/hermes_cli/web_routers/profiles.py b/hermes_cli/web_routers/profiles.py
+index d7bc45c2d813..38a43cb90f99 100644
+--- a/hermes_cli/web_routers/profiles.py
++++ b/hermes_cli/web_routers/profiles.py
+@@ -48,6 +48,7 @@
+ _profile_setup_command = late("_profile_setup_command")
+ _profile_to_dict = late("_profile_to_dict")
+ _resolve_profile_dir = late("_resolve_profile_dir")
++_isolated_dashboard_profile = late("_isolated_dashboard_profile")
+ _spawn_hermes_action = late("_spawn_hermes_action")
+ _strip_session_list_rows = late("_strip_session_list_rows")
+ _write_profile_mcp_servers = late("_write_profile_mcp_servers")
+@@ -93,6 +94,12 @@ def get_profiles_sessions(
+     from hermes_state import SessionDB
+     from hermes_cli import profiles as profiles_mod
+ 
++    isolated = _isolated_dashboard_profile()
++    if isolated:
++        if profile not in ("", "all", isolated):
++            _resolve_profile_dir(profile)
++        profile = isolated
++
+     targets: List[Tuple[str, Path]] = []
+     if profile and profile != "all":
+         name, home = _cron_profile_home(profile)
+@@ -227,14 +234,23 @@ def get_profiles_sessions_sidebar(
+     from hermes_state import SessionDB
+     from hermes_cli import profiles as profiles_mod
+ 
++    isolated = _isolated_dashboard_profile()
++    if isolated:
++        if recents_profile not in ("", "all", isolated):
++            _resolve_profile_dir(recents_profile)
++        recents_profile = isolated
++
+     # cron + messaging are cross-profile; recents is scoped to recents_profile.
+     # Scan every profile once regardless (each DB opened a single time).
+-    try:
+-        infos = profiles_mod.list_profiles()
+-        targets: List[Tuple[str, Path]] = [(info.name, info.path) for info in infos]
+-    except Exception:
+-        _log.exception("GET /api/profiles/sessions/sidebar: list_profiles failed")
+-        targets = []
++    if isolated:
++        targets: List[Tuple[str, Path]] = [(isolated, profiles_mod.get_profile_dir(isolated))]
++    else:
++        try:
++            infos = profiles_mod.list_profiles()
++            targets = [(info.name, info.path) for info in infos]
++        except Exception:
++            _log.exception("GET /api/profiles/sessions/sidebar: list_profiles failed")
++            targets = []
+     if not targets:
+         targets.append(("default", profiles_mod.get_profile_dir("default")))
+ 
+@@ -341,18 +357,27 @@ def _window(rows: List[Dict[str, Any]], cap: int) -> List[Dict[str, Any]]:
+ @router.get("/api/profiles")
+ async def list_profiles_endpoint():
+     from hermes_cli import profiles as profiles_mod
++    isolated = _isolated_dashboard_profile()
+     try:
+         loop = asyncio.get_running_loop()
+         profiles = await loop.run_in_executor(None, profiles_mod.list_profiles)
+-        return {"profiles": [_profile_to_dict(p) for p in profiles]}
++        result = [_profile_to_dict(p) for p in profiles]
++        if isolated:
++            result = [item for item in result if item.get("name") == isolated]
++        return {"profiles": result}
+     except Exception:
+         _log.exception("GET /api/profiles failed; falling back to profile directory scan")
+-        return {"profiles": _fallback_profile_dicts(profiles_mod)}
++        result = _fallback_profile_dicts(profiles_mod)
++        if isolated:
++            result = [item for item in result if item.get("name") == isolated]
++        return {"profiles": result}
+ 
+ 
+ @router.post("/api/profiles")
+ async def create_profile_endpoint(body: ProfileCreate):
+     from hermes_cli import profiles as profiles_mod
++    if _isolated_dashboard_profile():
++        raise HTTPException(status_code=403, detail="Profile creation is disabled in this dashboard.")
+     explicit_source = (body.clone_from or "").strip()
+     if explicit_source:
+         # Duplicating a specific profile: clone its config/skills/SOUL (or full
+@@ -473,6 +498,9 @@ async def get_active_profile_endpoint():
+     the running dashboard/gateway is scoped to (derived from HERMES_HOME).
+     """
+     from hermes_cli import profiles as profiles_mod
++    isolated = _isolated_dashboard_profile()
++    if isolated:
++        return {"active": isolated, "current": isolated}
+     try:
+         active = profiles_mod.get_active_profile() or "default"
+     except Exception:
+@@ -492,6 +520,11 @@ async def set_active_profile_endpoint(body: ProfileActiveUpdate):
+     it changes which profile subsequent CLI commands and gateways use.
+     """
+     from hermes_cli import profiles as profiles_mod
++    isolated = _isolated_dashboard_profile()
++    if isolated:
++        if (body.name or "").strip() != isolated:
++            raise HTTPException(status_code=403, detail="Profile switching is disabled in this dashboard.")
++        return {"ok": True, "active": isolated}
+     try:
+         profiles_mod.set_active_profile(body.name)
+     except FileNotFoundError as e:
+diff --git a/hermes_cli/web_server.py b/hermes_cli/web_server.py
+index 1fb3e6131629..e1ceed04b032 100644
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -106,7 +106,7 @@
+         WebSocket, WebSocketDisconnect,
+     )
+     from fastapi.middleware.cors import CORSMiddleware
+-    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
++    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+     from fastapi.staticfiles import StaticFiles
+     from pydantic import BaseModel, SecretStr, field_validator
+     from starlette.concurrency import run_in_threadpool
+@@ -122,7 +122,7 @@
+             WebSocket, WebSocketDisconnect,
+         )
+         from fastapi.middleware.cors import CORSMiddleware
+-        from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
++        from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+         from fastapi.staticfiles import StaticFiles
+         from pydantic import BaseModel, SecretStr, field_validator
+         from starlette.concurrency import run_in_threadpool
+@@ -2905,6 +2905,10 @@ def _collect_profile_gateway_topology() -> Dict[str, Any]:
+         _log.debug("profile/gateway topology enumeration failed", exc_info=True)
+         return {"profiles": [], "gateway_mode": "unknown", "gateways": []}
+ 
++    isolated = _isolated_dashboard_profile()
++    if isolated:
++        homes = [(name, home) for name, home in homes if name == isolated]
++
+     profile_names = [name for name, _home in homes]
+     gateways: List[Dict[str, Any]] = []
+     multiplex = False
+@@ -11585,11 +11589,14 @@ def _validate_dashboard_cron_context_from(
+ def _cron_profile_dicts() -> List[Dict[str, Any]]:
+     """Return dashboard profile records, falling back to a directory scan."""
+     from hermes_cli import profiles as profiles_mod
++    isolated = _isolated_dashboard_profile()
+     try:
+-        return [_profile_to_dict(p) for p in profiles_mod.list_profiles()]
++        profiles = [_profile_to_dict(p) for p in profiles_mod.list_profiles()]
++        return [p for p in profiles if p.get("name") == isolated] if isolated else profiles
+     except Exception:
+         _log.exception("Failed to list profiles for cron dashboard; falling back to directory scan")
+-        return _fallback_profile_dicts(profiles_mod)
++        profiles = _fallback_profile_dicts(profiles_mod)
++        return [p for p in profiles if p.get("name") == isolated] if isolated else profiles
+ 
+ 
+ def _cron_default_profile() -> str:
+@@ -11622,6 +11629,9 @@ def _cron_profile_home(profile: Optional[str]) -> Tuple[str, Path]:
+         profiles_mod.validate_profile_name(canon)
+     except ValueError as e:
+         raise HTTPException(status_code=400, detail=str(e))
++    isolated = _isolated_dashboard_profile()
++    if isolated and canon != isolated:
++        raise HTTPException(status_code=404, detail="Profile is not available in this dashboard.")
+     if not profiles_mod.profile_exists(canon):
+         raise HTTPException(status_code=404, detail=f"Profile '{canon}' does not exist.")
+     return canon, profiles_mod.get_profile_dir(canon)
+@@ -13278,6 +13288,20 @@ def _installed_hub_identifiers(profile: Optional[str] = None) -> dict:
+ # ---------------------------------------------------------------------------
+ 
+ 
++def _isolated_dashboard_profile() -> Optional[str]:
++    """Return the sole profile served by an explicitly isolated dashboard.
++
++    The default dashboard is intentionally machine-wide.  ``hermes dashboard
++    --isolated`` is different: its process may still be able to resolve the
++    machine profile tree, but the HTTP surface must not enumerate or mutate
++    profiles outside the profile it was launched from.
++    """
++    value = str(getattr(app.state, "isolated_profile", "") or "").strip()
++    if value in ("", "default", "custom"):
++        return None
++    return value
++
++
+ def _profile_attr(info, name: str, default: Any = None) -> Any:
+     try:
+         return getattr(info, name)
+@@ -13362,12 +13386,16 @@ def _resolve_profile_dir(name: str) -> Path:
+     """Validate ``name`` and resolve to its directory or raise an HTTPException."""
+     from hermes_cli import profiles as profiles_mod
+     try:
+-        profiles_mod.validate_profile_name(name)
++        canon = profiles_mod.normalize_profile_name(name)
++        profiles_mod.validate_profile_name(canon)
+     except ValueError as e:
+         raise HTTPException(status_code=400, detail=str(e))
+-    if not profiles_mod.profile_exists(name):
+-        raise HTTPException(status_code=404, detail=f"Profile '{name}' does not exist.")
+-    return profiles_mod.get_profile_dir(name)
++    isolated = _isolated_dashboard_profile()
++    if isolated and canon != isolated:
++        raise HTTPException(status_code=404, detail="Profile is not available in this dashboard.")
++    if not profiles_mod.profile_exists(canon):
++        raise HTTPException(status_code=404, detail=f"Profile '{canon}' does not exist.")
++    return profiles_mod.get_profile_dir(canon)
+ 
+ 
+ def _profile_setup_command(name: str) -> str:
+@@ -16165,6 +16193,21 @@ async def serve_spa(full_path: str, request: Request):
+                 {"detail": f"No such API endpoint: /{full_path}"},
+                 status_code=404,
+             )
++
++        # A profile-isolated dashboard has one canonical profile.  Keep old
++        # bookmarks such as /sessions?profile=default useful by redirecting
++        # the browser route to that profile; API requests remain strict and
++        # reject cross-profile access in _resolve_profile_dir().
++        isolated = _isolated_dashboard_profile()
++        requested_profile = request.query_params.get("profile")
++        if isolated and requested_profile and requested_profile != isolated:
++            query_items = [
++                (key, isolated if key == "profile" else value)
++                for key, value in request.query_params.multi_items()
++            ]
++            target = str(request.url.replace(query=urllib.parse.urlencode(query_items)))
++            return RedirectResponse(url=target, status_code=307)
++
+         file_path = WEB_DIST / full_path
+         # Prevent path traversal via url-encoded sequences (%2e%2e/)
+         if (
+@@ -17394,6 +17437,7 @@ def start_server(
+     open_browser: bool = True,
+     allow_public: bool = False,
+     initial_profile: str = "",
++    isolated_profile: str = "",
+     headless: bool = False,
+     ssh_session_token: Optional[str] = None,
+     ssh_owner_nonce: Optional[str] = None,
+@@ -17412,6 +17456,7 @@ def start_server(
+     ``ssh_session_token`` and ``ssh_owner_nonce`` are process-local Desktop SSH
+     bootstrap state. Neither is persisted or exported to child processes.
+     """
++    app.state.isolated_profile = (isolated_profile or "").strip()
+     _apply_ssh_session_token(ssh_session_token or "")
+     _apply_ssh_owner_nonce(ssh_owner_nonce)
+ 
+diff --git a/tests/hermes_cli/test_web_server_profile_unification.py b/tests/hermes_cli/test_web_server_profile_unification.py
+index a0534ac27339..2c52938e15fa 100644
+--- a/tests/hermes_cli/test_web_server_profile_unification.py
++++ b/tests/hermes_cli/test_web_server_profile_unification.py
+@@ -50,6 +50,36 @@ def _cfg(home):
+     return yaml.safe_load((home / "config.yaml").read_text()) or {}
+ 
+ 
++class TestIsolatedDashboard:
++    def test_isolated_dashboard_lists_only_its_profile(self, client, monkeypatch):
++        """A profile-isolated dashboard must not expose the machine profile list."""
++        from hermes_cli.web_server import app
++
++        monkeypatch.setattr(app.state, "isolated_profile", "worker_beta", raising=False)
++
++        response = client.get("/api/profiles")
++
++        assert response.status_code == 200
++        assert [item["name"] for item in response.json()["profiles"]] == ["worker_beta"]
++
++    def test_isolated_dashboard_rejects_cross_profile_reads_and_active_switches(
++        self, client, monkeypatch
++    ):
++        """URL/profile tampering cannot reach default from the named dashboard."""
++        from hermes_cli.web_server import app
++
++        monkeypatch.setattr(app.state, "isolated_profile", "worker_beta", raising=False)
++
++        sessions = client.get("/api/sessions?profile=default")
++        active = client.get("/api/profiles/active")
++        switch = client.post("/api/profiles/active", json={"name": "default"})
++
++        assert sessions.status_code == 404
++        assert active.status_code == 200
++        assert active.json() == {"active": "worker_beta", "current": "worker_beta"}
++        assert switch.status_code == 403
++
++
+ class TestProfileScopedConfig:
+ 
+ 
+
+From 65047e91eb9245e23b18718d892e90c34d0a714f Mon Sep 17 00:00:00 2001
+From: himanusia <19623185@std.stei.itb.ac.id>
+Date: Tue, 4 Aug 2026 12:25:07 +0700
+Subject: [PATCH 2/4] Clarify current profile selector label
+
+---
+ web/src/components/ProfileSwitcher.tsx | 2 +-
+ web/src/i18n/en.ts                     | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/web/src/components/ProfileSwitcher.tsx b/web/src/components/ProfileSwitcher.tsx
+index 206c72998873..36d1ee5bc195 100644
+--- a/web/src/components/ProfileSwitcher.tsx
++++ b/web/src/components/ProfileSwitcher.tsx
+@@ -21,7 +21,7 @@ export function ProfileSwitcher({ collapsed }: ProfileSwitcherProps) {
+ 
+   const currentDashboardLabel = useMemo(
+     () =>
+-      (t.app.currentProfileOption ?? "this dashboard ({name})").replace(
++      (t.app.currentProfileOption ?? "Current profile ({name})").replace(
+         "{name}",
+         currentProfile || "default",
+       ),
+diff --git a/web/src/i18n/en.ts b/web/src/i18n/en.ts
+index dda0dd0e937a..a4aaea4b5a61 100644
+--- a/web/src/i18n/en.ts
++++ b/web/src/i18n/en.ts
+@@ -94,7 +94,7 @@ export const en: Translations = {
+     system: "System",
+     webUi: "Web UI",
+     managingProfile: "Managing profile",
+-    currentProfileOption: "this dashboard ({name})",
++    currentProfileOption: "Current profile ({name})",
+     managingProfileBanner:
+       "Managing profile \u201c{name}\u201d \u2014 config, keys, skills, MCPs, model, and new chats apply to that profile.",
+   },
+
+From 5c59aceeb6c824e5605e0511e50c9cad0ed7de8f Mon Sep 17 00:00:00 2001
+From: himanusia <19623185@std.stei.itb.ac.id>
+Date: Tue, 4 Aug 2026 12:27:49 +0700
+Subject: [PATCH 3/4] Allow isolated dashboard login branding
+
+---
+ hermes_cli/dashboard_auth/login_page.py            | 13 ++++++++++---
+ tests/hermes_cli/test_dashboard_auth_401_reauth.py | 10 ++++++++++
+ 2 files changed, 20 insertions(+), 3 deletions(-)
+
+diff --git a/hermes_cli/dashboard_auth/login_page.py b/hermes_cli/dashboard_auth/login_page.py
+index 1ccdfcba4f53..39166516fab6 100644
+--- a/hermes_cli/dashboard_auth/login_page.py
++++ b/hermes_cli/dashboard_auth/login_page.py
+@@ -22,6 +22,7 @@ class name MUST NOT change without updating
+ from __future__ import annotations
+ 
+ import html
++import os
+ 
+ from hermes_cli.dashboard_auth import list_session_providers
+ 
+@@ -38,7 +39,7 @@ class name MUST NOT change without updating
+ <head>
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width, initial-scale=1">
+-<title>Sign in — Hermes Agent</title>
++<title>Sign in — {brand} Dashboard</title>
+ <style>
+   /* Brand fonts shipped by @nous-research/ui — same files the SPA loads. */
+   @font-face {{
+@@ -302,10 +303,10 @@ class name MUST NOT change without updating
+ </head>
+ <body>
+ <main>
+-  <div class="brand">Nous<span class="dot"></span>Research</div>
++  <div class="brand">{brand}</div>
+   <div class="card">
+     <h1>Sign in</h1>
+-    <p class="subtitle">Choose a sign-in method to continue to the Hermes Agent dashboard.</p>
++    <p class="subtitle">Choose a sign-in method to continue to the {brand} dashboard.</p>
+     <div class="provider-list">
+ {provider_buttons}
+     </div>
+@@ -469,6 +470,11 @@ def render_login_html(*, next_path: str = "") -> str:
+     if not providers:
+         return _EMPTY_HTML
+ 
++    brand = html.escape(
++        (os.environ.get("HERMES_DASHBOARD_BRAND") or "Nous Research").strip()
++        or "Nous Research"
++    )
++
+     if next_path:
+         # URL-encode then HTML-escape. The URL-encode step matches the
+         # gate's ``_safe_next_target`` output shape (also URL-encoded),
+@@ -493,6 +499,7 @@ def render_login_html(*, next_path: str = "") -> str:
+             )
+     script = _PASSWORD_FORM_SCRIPT if needs_password_script else ""
+     return _LOGIN_HTML_TEMPLATE.format(
++        brand=brand,
+         provider_buttons="\n".join(buttons),
+         password_script=script,
+     )
+diff --git a/tests/hermes_cli/test_dashboard_auth_401_reauth.py b/tests/hermes_cli/test_dashboard_auth_401_reauth.py
+index c96ae1503d3b..3955a4bd44e8 100644
+--- a/tests/hermes_cli/test_dashboard_auth_401_reauth.py
++++ b/tests/hermes_cli/test_dashboard_auth_401_reauth.py
+@@ -601,6 +601,16 @@ def test_no_next_emits_plain_button(self):
+         assert 'href="/auth/login?provider=stub"' in html_out
+         assert "next=" not in html_out
+ 
++    def test_profile_dashboard_brand_can_override_default(self, monkeypatch):
++        from hermes_cli.dashboard_auth.login_page import render_login_html
++
++        monkeypatch.setenv("HERMES_DASHBOARD_BRAND", "Inventra")
++        html_out = render_login_html()
++
++        assert 'class="brand">Inventra' in html_out
++        assert "Inventra dashboard" in html_out
++        assert "Nous<span class=\"dot\"></span>Research" not in html_out
++
+ 
+     def test_next_with_html_metacharacters_is_escaped(self):
+         """Defence in depth: even though the caller validates next_path,
+
+From d47c9fa59bd03615c2eff57550686d65c2d9b443 Mon Sep 17 00:00:00 2001
+From: himanusia <19623185@std.stei.itb.ac.id>
+Date: Tue, 4 Aug 2026 13:38:31 +0700
+Subject: [PATCH 4/4] Keep SPA theme tests independent of headless env
+
+---
+ tests/hermes_cli/test_web_server.py | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/tests/hermes_cli/test_web_server.py b/tests/hermes_cli/test_web_server.py
+index 4c0b5500f172..9d12127fffc7 100644
+--- a/tests/hermes_cli/test_web_server.py
++++ b/tests/hermes_cli/test_web_server.py
+@@ -2927,6 +2927,7 @@ def _mount_spa_client(tmp_path, monkeypatch):
+             encoding="utf-8",
+         )
+         monkeypatch.setattr(ws, "WEB_DIST", dist)
++        monkeypatch.delenv("HERMES_SERVE_HEADLESS", raising=False)
+         spa_app = FastAPI()
+         ws.mount_spa(spa_app)
+         return TestClient(spa_app)

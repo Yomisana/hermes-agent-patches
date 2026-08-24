@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "patches": [
+    {
+      "id": "91330-profile-write-boundary",
+      "issues": [91330],
+      "candidatePullRequests": [91345, 91381],
+      "selectedPullRequest": 91381,
+      "sourceHeadSha": "939374ce079405b0d73ed4685ecb5faa097ad49a",
+      "files": ["patches/enabled/91330-profile-write-boundary-pr-91381.patch"],
+      "patchSha256": "8f757362c6ec49d9eaa1ec346ee2c7256f8fb34bf5cdea430ffea1a0db0d3dfd",
+      "status": "approved",
+      "enabled": true,
+      "attribution": "Three upstream commits preserved verbatim: Argo and KeyArgo, PR #91381.",
+      "note": "Selected over narrower PR #91345 because it protects named profile endpoints plus machine-global create/import/active operations and includes adversarial tests."
+    },
+    {
+      "id": "76932-profile-session-isolation",
+      "issues": [76932],
+      "candidatePullRequests": [77125, 78423, 71037, 48652],
+      "selectedPullRequest": 77125,
+      "sourceHeadSha": "eb14cb03d8aaae824e816e571c46789daca1752e",
+      "files": ["patches/enabled/76932-profile-session-isolation-backport.patch"],
+      "patchSha256": "e6836c284a9748161327a0a743c5bee9303c631c42f588b44424ed6de4e765c5",
+      "status": "approved",
+      "enabled": true,
+      "attribution": "Adapted for v2026.8.19 by Yomisana from the fix proposed by webtecnica in PR #77125; original candidate mbox is retained unchanged.",
+      "note": "Uses PR #91381's explicit isolated flag rather than inferring isolation from a non-default profile name; also scopes profile=all session aggregation."
+    },
+    {
+      "id": "88897-profile-database-routing",
+      "issues": [88897],
+      "candidatePullRequests": [89173],
+      "selectedPullRequest": 89173,
+      "sourceHeadSha": "fab84c58873c6b259c31da2f11797f04ff5d3cd3",
+      "files": ["patches/enabled/88897-profile-database-routing-backport.patch"],
+      "patchSha256": "0a4ff2d94f5811e063409da12e8ba04cbe89e100637afc7451ef40c3e7056dc9",
+      "status": "approved",
+      "enabled": true,
+      "attribution": "Minimal v2026.8.19 adaptation by Yomisana of the behavior and focused tests authored by Ayush Nangia in PR #89173; original candidate mbox is retained unchanged.",
+      "note": "Avoids importing unrelated formatting drift in the open PR while preserving the proposed profile=default behavior and regression tests."
+    }
+  ]
+}

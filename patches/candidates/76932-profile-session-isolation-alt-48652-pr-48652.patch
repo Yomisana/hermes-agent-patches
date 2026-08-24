@@ -1,0 +1,855 @@
+From 21c21454ebf33b30c128cf61fc775a14629e7ebe Mon Sep 17 00:00:00 2001
+From: endgame777 <endgame777@users.noreply.github.com>
+Date: Thu, 18 Jun 2026 21:24:19 +0000
+Subject: [PATCH] fix: isolate dashboard profile backends
+
+---
+ apps/desktop/src/app/chat/sidebar/index.tsx   |   6 +-
+ .../app/chat/sidebar/virtual-session-list.tsx |   4 +-
+ apps/desktop/src/app/desktop-controller.tsx   |  54 ++++++-
+ .../session/hooks/use-route-resume.test.tsx   |   8 +-
+ .../src/app/session/hooks/use-route-resume.ts |   7 +-
+ .../app/session/hooks/use-session-actions.ts  |  37 +++--
+ hermes_cli/main.py                            |   5 +
+ hermes_cli/web_server.py                      |  77 ++++++++-
+ .../test_dashboard_profile_isolation.py       | 148 ++++++++++++++++++
+ web/src/App.tsx                               |   5 +-
+ web/src/contexts/ProfileProvider.tsx          |  15 +-
+ web/src/pages/ChatPage.tsx                    |  30 +++-
+ 12 files changed, 352 insertions(+), 44 deletions(-)
+ create mode 100644 tests/hermes_cli/test_dashboard_profile_isolation.py
+
+diff --git a/apps/desktop/src/app/chat/sidebar/index.tsx b/apps/desktop/src/app/chat/sidebar/index.tsx
+index 7f46367344db..357e8e44cb57 100644
+--- a/apps/desktop/src/app/chat/sidebar/index.tsx
++++ b/apps/desktop/src/app/chat/sidebar/index.tsx
+@@ -303,7 +303,7 @@ interface ChatSidebarProps extends React.ComponentProps<typeof Sidebar> {
+   onLoadMoreSessions: () => void
+   onLoadMoreProfileSessions?: (profile: string) => Promise<void> | void
+   onLoadMoreMessaging?: (platform: string) => Promise<void> | void
+-  onResumeSession: (sessionId: string) => void
++  onResumeSession: (sessionId: string, profile?: null | string) => Promise<void> | void
+   onDeleteSession: (sessionId: string) => void
+   onArchiveSession: (sessionId: string) => void
+   onNewSessionInWorkspace: (path: null | string) => void
+@@ -1169,7 +1169,7 @@ interface SidebarSessionsSectionProps {
+   sessions: SessionInfo[]
+   activeSessionId: null | string
+   workingSessionIdSet: Set<string>
+-  onResumeSession: (sessionId: string) => void
++  onResumeSession: (sessionId: string, profile?: null | string) => Promise<void> | void
+   onDeleteSession: (sessionId: string) => void
+   onArchiveSession: (sessionId: string) => void
+   onTogglePin: (sessionId: string) => void
+@@ -1239,7 +1239,7 @@ function SidebarSessionsSection({
+       onArchive: () => onArchiveSession(session.id),
+       onDelete: () => onDeleteSession(session.id),
+       onPin: () => onTogglePin(sessionPinId(session)),
+-      onResume: () => onResumeSession(session.id),
++      onResume: () => onResumeSession(session.id, session.profile),
+       session
+     }
+ 
+diff --git a/apps/desktop/src/app/chat/sidebar/virtual-session-list.tsx b/apps/desktop/src/app/chat/sidebar/virtual-session-list.tsx
+index 5f82b305962a..8c82f76d172d 100644
+--- a/apps/desktop/src/app/chat/sidebar/virtual-session-list.tsx
++++ b/apps/desktop/src/app/chat/sidebar/virtual-session-list.tsx
+@@ -24,7 +24,7 @@ interface VirtualSessionListProps {
+   className?: string
+   onArchiveSession: (sessionId: string) => void
+   onDeleteSession: (sessionId: string) => void
+-  onResumeSession: (sessionId: string) => void
++  onResumeSession: (sessionId: string, profile?: null | string) => Promise<void> | void
+   onTogglePin: (sessionId: string) => void
+   pinned: boolean
+   sessions: SessionInfo[]
+@@ -78,7 +78,7 @@ export const VirtualSessionList: FC<VirtualSessionListProps> = ({
+       onArchive: () => onArchiveSession(session.id),
+       onDelete: () => onDeleteSession(session.id),
+       onPin: () => onTogglePin(sessionPinId(session)),
+-      onResume: () => onResumeSession(session.id)
++      onResume: () => onResumeSession(session.id, session.profile)
+     }
+ 
+     return sortable ? (
+diff --git a/apps/desktop/src/app/desktop-controller.tsx b/apps/desktop/src/app/desktop-controller.tsx
+index 05dfbbc764f8..8b8481a1bcee 100644
+--- a/apps/desktop/src/app/desktop-controller.tsx
++++ b/apps/desktop/src/app/desktop-controller.tsx
+@@ -160,7 +160,18 @@ function sameCronSignature(a: SessionInfo[], b: SessionInfo[]): boolean {
+     return false
+   }
+ 
+-  return a.every((session, i) => session.id === b[i]?.id && session.title === b[i]?.title)
++  return a.every(
++    (session, i) =>
++      session.id === b[i]?.id &&
++      session.profile === b[i]?.profile &&
++      session.source === b[i]?.source &&
++      session.title === b[i]?.title &&
++      session.last_active === b[i]?.last_active
++  )
++}
++
++export function sessionListProfileForScope(profileScope: string): 'all' | (string & {}) {
++  return profileScope === ALL_PROFILES ? 'all' : profileScope
+ }
+ 
+ // Rows a session refresh must preserve even if the aggregator omits them:
+@@ -197,6 +208,7 @@ export function DesktopController() {
+   const busyRef = useRef(false)
+   const creatingSessionRef = useRef(false)
+   const refreshSessionsRequestRef = useRef(0)
++  const refreshMessagingSessionsRequestRef = useRef(0)
+ 
+   const gatewayState = useStore($gatewayState)
+   const activeSessionId = useStore($activeSessionId)
+@@ -216,6 +228,9 @@ export function DesktopController() {
+   const narrowViewport = useMediaQuery(SIDEBAR_COLLAPSE_MEDIA_QUERY)
+ 
+   const routedSessionId = routeSessionId(location.pathname)
++  const routeState = location.state as { sessionProfile?: unknown } | null
++  const routedSessionProfileHint =
++    typeof routeState?.sessionProfile === 'string' ? normalizeProfileKey(routeState.sessionProfile) : null
+   const routeToken = `${location.pathname}:${location.search}:${location.hash}`
+   const routeTokenRef = useRef(routeToken)
+   routeTokenRef.current = routeToken
+@@ -370,23 +385,40 @@ export function DesktopController() {
+   // competes with local chats for the recents page budget. One combined fetch
+   // seeds every platform; the sidebar splits the rows per source.
+   const refreshMessagingSessions = useCallback(async () => {
++    const requestId = refreshMessagingSessionsRequestRef.current + 1
++    refreshMessagingSessionsRequestRef.current = requestId
++    const sessionProfile = sessionListProfileForScope(profileScope)
++
+     try {
+-      const result = await listAllProfileSessions(MESSAGING_SECTION_LIMIT, 1, 'exclude', 'recent', 'all', {
++      const result = await listAllProfileSessions(MESSAGING_SECTION_LIMIT, 1, 'exclude', 'recent', sessionProfile, {
+         excludeSources: MESSAGING_EXCLUDED_SOURCES
+       })
+ 
++      if (refreshMessagingSessionsRequestRef.current !== requestId) {
++        return
++      }
++
+       // Drop any non-messaging source the broad exclude didn't catch (custom
+       // sources) — those stay in local recents, not a platform section.
+       const rows = result.sessions.filter(s => isMessagingSource(s.source))
+ 
+       setMessagingSessions(prev => (sameCronSignature(prev, rows) ? prev : rows))
++      // Exact per-platform totals are scoped (profile + platform). A fresh seed
++      // fetch changes that scope, so drop any totals learned from a previous
++      // profile/all-profiles platform pager instead of showing e.g. Prime as
++      // "0/181 Telegram" because Default was loaded first.
++      setMessagingPlatformTotals({})
+       // Hit the cap → at least one platform may have more on disk than loaded,
+       // so platform sections offer their own per-platform "load more".
+       setMessagingTruncated(result.sessions.length >= MESSAGING_SECTION_LIMIT)
+     } catch {
+-      // Non-fatal: the messaging sections just stay empty/stale.
++      if (refreshMessagingSessionsRequestRef.current === requestId) {
++        setMessagingSessions([])
++        setMessagingPlatformTotals({})
++        setMessagingTruncated(false)
++      }
+     }
+-  }, [])
++  }, [profileScope])
+ 
+   // Page a single platform's section independently (mirrors the per-profile
+   // pager): fetch that source's next window and merge it back in place, leaving
+@@ -394,11 +426,16 @@ export function DesktopController() {
+   const loadMoreMessagingForPlatform = useCallback(async (platform: string) => {
+     const inPlatform = (s: SessionInfo) => normalizeSessionSource(s.source) === platform
+     const loaded = $messagingSessions.get().filter(inPlatform).length
++    const sessionProfile = sessionListProfileForScope(profileScope)
+ 
+-    const result = await listAllProfileSessions(loaded + SIDEBAR_SESSIONS_PAGE_SIZE, 1, 'exclude', 'recent', 'all', {
++    const result = await listAllProfileSessions(loaded + SIDEBAR_SESSIONS_PAGE_SIZE, 1, 'exclude', 'recent', sessionProfile, {
+       source: platform
+     })
+ 
++    if ($profileScope.get() !== profileScope) {
++      return
++    }
++
+     const incoming = result.sessions.filter(s => normalizeSessionSource(s.source) === platform)
+ 
+     setMessagingSessions(prev => [
+@@ -408,7 +445,7 @@ export function DesktopController() {
+ 
+     const total = result.total ?? incoming.length
+     setMessagingPlatformTotals(prev => ({ ...prev, [platform]: Math.max(total, incoming.length) }))
+-  }, [])
++  }, [profileScope])
+ 
+   // Cron *jobs* drive the sidebar "Cron jobs" section. Jobs are created
+   // synchronously (agent tool call or the cron UI), so refreshing here right
+@@ -892,6 +929,7 @@ export function DesktopController() {
+     freshDraftReady,
+     gatewayState,
+     locationPathname: location.pathname,
++    profileHint: routedSessionProfileHint,
+     resumeSession,
+     resumeFailedSessionId,
+     resumeExhaustedSessionId,
+@@ -933,7 +971,9 @@ export function DesktopController() {
+       }}
+       onNavigate={selectSidebarItem}
+       onNewSessionInWorkspace={startSessionInWorkspace}
+-      onResumeSession={sessionId => navigate(sessionRoute(sessionId))}
++      onResumeSession={(sessionId, profile) =>
++        navigate(sessionRoute(sessionId), profile ? { state: { sessionProfile: profile } } : undefined)
++      }
+       onTriggerCronJob={jobId => {
+         void triggerCronJob(jobId)
+           .then(() => refreshCronJobs())
+diff --git a/apps/desktop/src/app/session/hooks/use-route-resume.test.tsx b/apps/desktop/src/app/session/hooks/use-route-resume.test.tsx
+index e05f8b748dd5..a98f6b166af1 100644
+--- a/apps/desktop/src/app/session/hooks/use-route-resume.test.tsx
++++ b/apps/desktop/src/app/session/hooks/use-route-resume.test.tsx
+@@ -14,7 +14,7 @@ interface HarnessProps {
+   freshDraftReady: boolean
+   gatewayState: string
+   locationPathname: string
+-  resumeSession: (sessionId: string, focus: boolean) => Promise<unknown>
++  resumeSession: (sessionId: string, focus: boolean, profileHint?: null | string) => Promise<unknown>
+   resumeFailedSessionId?: null | string
+   resumeExhaustedSessionId?: null | string
+   routedSessionId: null | string
+@@ -143,7 +143,7 @@ describe('useRouteResume', () => {
+     )
+ 
+     expect(resumeSession).toHaveBeenCalledTimes(1)
+-    expect(resumeSession).toHaveBeenCalledWith('session-1', true)
++    expect(resumeSession).toHaveBeenCalledWith('session-1', true, undefined)
+   })
+ 
+   it('resumes when pathname changes to a routed session', () => {
+@@ -193,7 +193,7 @@ describe('useRouteResume', () => {
+     )
+ 
+     expect(resumeSession).toHaveBeenCalledTimes(1)
+-    expect(resumeSession).toHaveBeenCalledWith('session-2', true)
++    expect(resumeSession).toHaveBeenCalledWith('session-2', true, undefined)
+   })
+ 
+   it('resumes the selected route again when the gateway reconnects', () => {
+@@ -261,7 +261,7 @@ describe('useRouteResume', () => {
+     )
+ 
+     expect(resumeSession).toHaveBeenCalledTimes(1)
+-    expect(resumeSession).toHaveBeenCalledWith('session-1', true)
++    expect(resumeSession).toHaveBeenCalledWith('session-1', true, undefined)
+   })
+ })
+ 
+diff --git a/apps/desktop/src/app/session/hooks/use-route-resume.ts b/apps/desktop/src/app/session/hooks/use-route-resume.ts
+index 1be8da90c64a..d640ab27f748 100644
+--- a/apps/desktop/src/app/session/hooks/use-route-resume.ts
++++ b/apps/desktop/src/app/session/hooks/use-route-resume.ts
+@@ -11,7 +11,8 @@ interface RouteResumeOptions {
+   freshDraftReady: boolean
+   gatewayState: string | undefined
+   locationPathname: string
+-  resumeSession: (sessionId: string, focus: boolean) => Promise<unknown>
++  profileHint?: null | string
++  resumeSession: (sessionId: string, focus: boolean, profileHint?: null | string) => Promise<unknown>
+   // Stored-session id whose most recent resume failed terminally (set by
+   // useSessionActions, mirrored from $resumeFailedSessionId). While this equals
+   // routedSessionId the window would otherwise latch on the loader forever, so
+@@ -73,6 +74,7 @@ export function useRouteResume({
+   freshDraftReady,
+   gatewayState,
+   locationPathname,
++  profileHint,
+   resumeSession,
+   resumeFailedSessionId,
+   resumeExhaustedSessionId,
+@@ -147,7 +149,7 @@ export function useRouteResume({
+       // rebinds/reaps the session on its side, and trusting it strands Desktop on
+       // a dead id ("session not found"). Otherwise keep skipping when already active.
+       if ((gatewayBecameOpen || !alreadyActive) && shouldResume && !creatingSessionRef.current) {
+-        void resumeSession(routedSessionId, true)
++        void resumeSession(routedSessionId, true, profileHint)
+       }
+ 
+       return
+@@ -169,6 +171,7 @@ export function useRouteResume({
+     freshDraftReady,
+     gatewayState,
+     locationPathname,
++    profileHint,
+     resumeSession,
+     routedSessionId,
+     runtimeIdByStoredSessionIdRef,
+diff --git a/apps/desktop/src/app/session/hooks/use-session-actions.ts b/apps/desktop/src/app/session/hooks/use-session-actions.ts
+index 36dfea759f2c..431387b629c3 100644
+--- a/apps/desktop/src/app/session/hooks/use-session-actions.ts
++++ b/apps/desktop/src/app/session/hooks/use-session-actions.ts
+@@ -217,7 +217,11 @@ function patchSessionWorkspace(sessionId: string, cwd: string | undefined) {
+   setSessions(prev => prev.map(session => (session.id === sessionId ? { ...session, cwd } : session)))
+ }
+ 
+-function sessionMatchesStoredId(session: SessionInfo, storedSessionId: string): boolean {
++function sessionMatchesStoredId(session: SessionInfo, storedSessionId: string, profileHint?: null | string): boolean {
++  if (profileHint && normalizeProfileKey(session.profile) !== normalizeProfileKey(profileHint)) {
++    return false
++  }
++
+   return session.id === storedSessionId || session._lineage_root_id === storedSessionId
+ }
+ 
+@@ -236,13 +240,28 @@ function upsertResolvedSession(session: SessionInfo, storedSessionId: string) {
+   ])
+ }
+ 
+-async function resolveStoredSession(storedSessionId: string): Promise<SessionInfo | undefined> {
+-  const cached = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
++async function resolveStoredSession(storedSessionId: string, profileHint?: null | string): Promise<SessionInfo | undefined> {
++  const hintedProfile = profileHint ? normalizeProfileKey(profileHint) : null
++  const cached = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId, hintedProfile))
+ 
+   if (cached) {
+     return cached
+   }
+ 
++  if (hintedProfile) {
++    try {
++      const session = await getSession(storedSessionId, hintedProfile)
++
++      upsertResolvedSession(session, storedSessionId)
++
++      return session
++    } catch {
++      // Fall through: stale route state or a deleted remote row. The normal
++      // active-profile/direct lookup + cross-profile probe below still handles
++      // pasted/legacy URLs without a hint.
++    }
++  }
++
+   // Direct by-id on the live backend — one row lookup, no list scan. Covers
+   // single-profile users and any id on the active profile (e.g. an old session
+   // past the sidebar's recent window). 404 just means it's not on this profile.
+@@ -264,7 +283,7 @@ async function resolveStoredSession(storedSessionId: string): Promise<SessionInf
+   const otherProfiles = $profiles
+     .get()
+     .map(profile => normalizeProfileKey(profile.name))
+-    .filter(key => key !== activeKey)
++    .filter(key => key !== activeKey && key !== hintedProfile)
+ 
+   for (const profile of otherProfiles) {
+     try {
+@@ -562,7 +581,7 @@ export function useSessionActions({
+   }, [navigate, selectedStoredSessionId])
+ 
+   const resumeSession = useCallback(
+-    async (storedSessionId: string, replaceRoute = false) => {
++    async (storedSessionId: string, replaceRoute = false, profileHint?: null | string) => {
+       const requestId = resumeRequestRef.current + 1
+       resumeRequestRef.current = requestId
+ 
+@@ -603,8 +622,8 @@ export function useSessionActions({
+       // gateway call (no-op when it's already on that profile / single-profile).
+       // resolveStoredSession finds the row by id (cheap), so an uncached pasted
+       // id loads as fast as a sidebar click instead of hanging on a list scan.
+-      const storedForProfile = await resolveStoredSession(storedSessionId)
+-      const sessionProfile = storedForProfile?.profile
++      const storedForProfile = await resolveStoredSession(storedSessionId, profileHint)
++      const sessionProfile = storedForProfile?.profile ?? profileHint
+ 
+       if (resumeRequestRef.current !== requestId) {
+         return
+@@ -616,7 +635,7 @@ export function useSessionActions({
+       const cachedState = cachedRuntimeId && sessionStateByRuntimeIdRef.current.get(cachedRuntimeId)
+ 
+       if (cachedRuntimeId && cachedState) {
+-        const stored = $sessions.get().find(session => session.id === storedSessionId)
++        const stored = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId, sessionProfile))
+ 
+         const cachedViewState =
+           !cachedState.model && stored?.model != null
+@@ -678,7 +697,7 @@ export function useSessionActions({
+       setSelectedStoredSessionId(storedSessionId)
+       selectedStoredSessionIdRef.current = storedSessionId
+       setSessionStartedAt(Date.now())
+-      const stored = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId))
++      const stored = $sessions.get().find(session => sessionMatchesStoredId(session, storedSessionId, sessionProfile))
+       applyStoredSessionPreviewRuntimeInfo(stored)
+ 
+       if (stored) {
+diff --git a/hermes_cli/main.py b/hermes_cli/main.py
+index c69cd60b42a8..d39ac9db1820 100644
+--- a/hermes_cli/main.py
++++ b/hermes_cli/main.py
+@@ -10999,12 +10999,17 @@ def cmd_dashboard(args):
+     # The in-browser Chat tab (the embedded TUI over PTY/WebSocket) is always
+     # available — the desktop app and the dashboard's own Chat tab both rely on
+     # the `/api/ws` + `/api/pty` sockets, so there is no reason to gate them.
++    _dashboard_isolated_profile = ""
++    if getattr(args, "isolated", False) or os.environ.get("HERMES_DESKTOP") == "1":
++        _dashboard_isolated_profile = _launch_profile if _launch_profile != "custom" else ""
++
+     start_server(
+         host=args.host,
+         port=args.port,
+         open_browser=not args.no_open,
+         allow_public=getattr(args, "insecure", False),
+         initial_profile=getattr(args, "open_profile", "") or "",
++        isolated_profile=_dashboard_isolated_profile,
+     )
+ 
+ 
+diff --git a/hermes_cli/web_server.py b/hermes_cli/web_server.py
+index ed619979bfb7..10ee4187cb20 100644
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -1690,6 +1690,7 @@ async def fs_default_cwd():
+ @app.get("/api/status")
+ async def get_status(profile: Optional[str] = None):
+     status_scope = None
++    profile = _scope_profile_for_isolated_dashboard(profile, allow_all=True)
+     requested_profile = (profile or "").strip()
+     # Plain /api/status stays the machine-level public liveness probe. The
+     # dashboard adds ?profile= when its management switcher targets another
+@@ -2771,6 +2772,60 @@ async def get_action_status(name: str, lines: int = 200):
+     }
+ 
+ 
++def _dashboard_isolated_profile() -> Optional[str]:
++    """Return the profile this dashboard backend is pinned to, if any.
++
++    The normal machine dashboard is intentionally cross-profile. Desktop pool
++    backends and ``hermes dashboard --isolated`` are not: those processes serve
++    exactly one profile and must not let query params enumerate sibling profile
++    state.
++    """
++    raw = getattr(app.state, "isolated_profile", "") or ""
++    if not isinstance(raw, str):
++        raw = str(raw)
++    raw = raw.strip()
++    return raw or None
++
++
++def _scope_profile_for_isolated_dashboard(
++    profile: Optional[str],
++    *,
++    allow_all: bool = False,
++) -> Optional[str]:
++    """Clamp or reject profile query params for an isolated backend.
++
++    ``profile=all`` is a dashboard-sidebar convenience on the machine backend.
++    On an isolated profile backend it means "all sessions for this profile", not
++    "all profiles on disk". Explicit sibling profile names are rejected so
++    direct detail/list endpoints cannot bypass the aggregate clamp.
++    """
++    isolated = _dashboard_isolated_profile()
++    if not isolated:
++        return profile
++
++    requested = (profile or "").strip()
++    if not requested:
++        return profile
++    if allow_all and requested.lower() == "all":
++        return isolated
++
++    from hermes_cli import profiles as profiles_mod
++
++    try:
++        requested_canon = profiles_mod.normalize_profile_name(requested)
++        isolated_canon = profiles_mod.normalize_profile_name(isolated)
++        profiles_mod.validate_profile_name(requested_canon)
++    except ValueError as e:
++        raise HTTPException(status_code=400, detail=str(e))
++
++    if requested_canon != isolated_canon:
++        raise HTTPException(
++            status_code=403,
++            detail=f"Dashboard backend is isolated to profile '{isolated_canon}'.",
++        )
++    return requested_canon
++
++
+ @app.get("/api/sessions")
+ async def get_sessions(
+     limit: int = 20,
+@@ -2804,6 +2859,7 @@ async def get_sessions(
+             status_code=400,
+             detail="order must be one of: created, recent",
+         )
++    profile = _scope_profile_for_isolated_dashboard(profile)
+     profile_name: Optional[str] = None
+     if profile:
+         profile_name, _ = _cron_profile_home(profile)
+@@ -2864,7 +2920,7 @@ async def get_profiles_sessions(
+     min_messages: int = 0,
+     archived: str = "exclude",
+     order: str = "recent",
+-    profile: str = "all",
++    profile: Optional[str] = "all",
+     source: str = None,
+     exclude_sources: str = None,
+ ):
+@@ -2885,6 +2941,7 @@ async def get_profiles_sessions(
+     from hermes_state import SessionDB
+     from hermes_cli import profiles as profiles_mod
+ 
++    profile = _scope_profile_for_isolated_dashboard(profile, allow_all=True)
+     targets: List[Tuple[str, Path]] = []
+     if profile and profile != "all":
+         name, home = _cron_profile_home(profile)
+@@ -4985,6 +5042,7 @@ async def get_messaging_platforms(profile: Optional[str] = None):
+     # TARGET profile's channel credentials/state, not the root install's.
+     # Inside _profile_scope, load_env()/read_runtime_status()/get_running_pid()
+     # all resolve against the requested profile's HERMES_HOME.
++    profile = _scope_profile_for_isolated_dashboard(profile, allow_all=True)
+     with _profile_scope(profile) as scoped_dir:
+         env_on_disk = load_env()
+         runtime = read_runtime_status()
+@@ -5011,8 +5069,9 @@ async def update_messaging_platform(
+         )
+ 
+     allowed_env = set(entry["env_vars"])
++    target_profile = _scope_profile_for_isolated_dashboard(body.profile or profile, allow_all=True)
+     try:
+-        with _profile_scope(body.profile or profile):
++        with _profile_scope(target_profile):
+             for key in body.clear_env:
+                 if key not in allowed_env:
+                     raise HTTPException(
+@@ -5050,6 +5109,7 @@ async def test_messaging_platform(platform_id: str, profile: Optional[str] = Non
+             status_code=404, detail=f"Unknown messaging platform: {platform_id}"
+         )
+ 
++    profile = _scope_profile_for_isolated_dashboard(profile, allow_all=True)
+     with _profile_scope(profile) as scoped_dir:
+         env_on_disk = load_env()
+         payload = _messaging_platform_payload(
+@@ -6832,6 +6892,7 @@ def _open_session_db_for_profile(profile: Optional[str]):
+     (transcripts, detail) without spawning that profile's backend.
+     """
+     from hermes_state import SessionDB
++    profile = _scope_profile_for_isolated_dashboard(profile)
+     if not profile:
+         return SessionDB()
+     _name, home = _cron_profile_home(profile)
+@@ -9548,6 +9609,7 @@ def _profile_scope(profile: Optional[str]):
+     imported the modules before a HERMES_HOME override, or under test
+     isolation).
+     """
++    profile = _scope_profile_for_isolated_dashboard(profile, allow_all=True)
+     requested = (profile or "").strip()
+ 
+     from hermes_constants import (
+@@ -9601,6 +9663,7 @@ def _config_profile_scope(profile: Optional[str]):
+ 
+     None/""/"current" means the dashboard's own profile — no override.
+     """
++    profile = _scope_profile_for_isolated_dashboard(profile, allow_all=True)
+     requested = (profile or "").strip()
+     if not requested or requested.lower() == "current":
+         yield None
+@@ -12143,6 +12206,7 @@ def start_server(
+     open_browser: bool = True,
+     allow_public: bool = False,
+     initial_profile: str = "",
++    isolated_profile: str = "",
+ ):
+     """Start the web UI server.
+ 
+@@ -12150,6 +12214,10 @@ def start_server(
+     URL as ``?profile=<name>`` so the SPA's profile switcher preselects it
+     — used when a profile alias (``<profile> dashboard``) routes to the
+     machine dashboard.
++
++    ``isolated_profile`` pins this backend to one profile. It is set for
++    desktop-spawned pool backends and ``hermes dashboard --isolated``; normal
++    machine dashboards leave it empty and keep cross-profile management.
+     """
+     import uvicorn
+ 
+@@ -12158,6 +12226,11 @@ def start_server(
+     # uses this to decide whether to refuse the bind, log the gate-on
+     # banner, and enable uvicorn proxy_headers.
+     app.state.auth_required = should_require_auth(host, allow_public)
++    isolated_profile = (isolated_profile or "").strip()
++    if isolated_profile:
++        app.state.isolated_profile = isolated_profile
++    elif hasattr(app.state, "isolated_profile"):
++        delattr(app.state, "isolated_profile")
+ 
+     if app.state.auth_required:
+         # Phase 3.5: the gate engages on non-loopback binds.  The legacy
+diff --git a/tests/hermes_cli/test_dashboard_profile_isolation.py b/tests/hermes_cli/test_dashboard_profile_isolation.py
+new file mode 100644
+index 000000000000..ddd40080e1ac
+--- /dev/null
++++ b/tests/hermes_cli/test_dashboard_profile_isolation.py
+@@ -0,0 +1,148 @@
++"""Regression tests for dashboard profile isolation.
++
++Machine dashboards intentionally aggregate all local profiles. Desktop-spawned
++or --isolated backends are different: they are the backend for exactly one
++profile and must not expose sibling profile sessions through cross-profile API
++query parameters.
++"""
++
++from __future__ import annotations
++
++from types import SimpleNamespace
++
++import pytest
++from fastapi.testclient import TestClient
++
++from hermes_cli import web_server
++from hermes_state import SessionDB
++
++
++pytestmark = pytest.mark.xdist_group("dashboard_auth_app_state")
++
++
++def _restore_attr(state, name: str, previous):
++    if previous is None:
++        if hasattr(state, name):
++            delattr(state, name)
++    else:
++        setattr(state, name, previous)
++
++
++@pytest.fixture
++def profile_homes(monkeypatch, tmp_path):
++    homes = {
++        "default": tmp_path / "default-home",
++        "prime": tmp_path / "profiles" / "prime",
++        "architect": tmp_path / "profiles" / "architect",
++    }
++    for name, home in homes.items():
++        home.mkdir(parents=True)
++        db = SessionDB(db_path=home / "state.db")
++        try:
++            db.create_session(f"{name}-session", source="cli")
++        finally:
++            db.close()
++
++    from hermes_cli import profiles as profiles_mod
++
++    monkeypatch.setattr(profiles_mod, "profile_exists", lambda name: name in homes)
++    monkeypatch.setattr(profiles_mod, "get_profile_dir", lambda name: homes[name])
++    monkeypatch.setattr(
++        profiles_mod,
++        "list_profiles",
++        lambda: [SimpleNamespace(name=name, path=home) for name, home in homes.items()],
++    )
++    monkeypatch.setenv("HERMES_HOME", str(homes["prime"]))
++    return homes
++
++
++@pytest.fixture
++def dashboard_client(profile_homes):
++    state = web_server.app.state
++    prev_auth_required = getattr(state, "auth_required", None)
++    prev_bound_host = getattr(state, "bound_host", None)
++    prev_bound_port = getattr(state, "bound_port", None)
++    prev_isolated_profile = getattr(state, "isolated_profile", None)
++
++    state.auth_required = False
++    state.bound_host = "127.0.0.1"
++    state.bound_port = 9119
++    if hasattr(state, "isolated_profile"):
++        delattr(state, "isolated_profile")
++
++    client = TestClient(web_server.app, base_url="http://127.0.0.1:9119")
++    client.headers[web_server._SESSION_HEADER_NAME] = web_server._SESSION_TOKEN
++    try:
++        yield client
++    finally:
++        client.close()
++        _restore_attr(state, "auth_required", prev_auth_required)
++        _restore_attr(state, "bound_host", prev_bound_host)
++        _restore_attr(state, "bound_port", prev_bound_port)
++        _restore_attr(state, "isolated_profile", prev_isolated_profile)
++
++
++def test_machine_dashboard_profiles_sessions_all_still_aggregates_all_profiles(dashboard_client):
++    response = dashboard_client.get("/api/profiles/sessions", params={"profile": "all"})
++
++    assert response.status_code == 200, response.text
++    body = response.json()
++    assert set(body["profile_totals"]) == {"default", "prime", "architect"}
++    assert body["total"] == 3
++    assert {session["profile"] for session in body["sessions"]} == {
++        "default",
++        "prime",
++        "architect",
++    }
++
++
++def test_isolated_dashboard_profiles_sessions_all_returns_only_isolated_profile(dashboard_client):
++    web_server.app.state.isolated_profile = "prime"
++
++    response = dashboard_client.get("/api/profiles/sessions", params={"profile": "all"})
++
++    assert response.status_code == 200, response.text
++    body = response.json()
++    assert body["profile_totals"] == {"prime": 1}
++    assert body["total"] == 1
++    assert [session["profile"] for session in body["sessions"]] == ["prime"]
++    assert [session["id"] for session in body["sessions"]] == ["prime-session"]
++
++
++def test_isolated_dashboard_rejects_explicit_sibling_profile_session_reads(dashboard_client):
++    web_server.app.state.isolated_profile = "prime"
++
++    aggregate = dashboard_client.get(
++        "/api/profiles/sessions",
++        params={"profile": "architect"},
++    )
++    direct = dashboard_client.get(
++        "/api/sessions",
++        params={"profile": "architect"},
++    )
++
++    assert aggregate.status_code == 403
++    assert direct.status_code == 403
++
++
++def test_isolated_dashboard_rejects_explicit_sibling_profile_status_and_channels(dashboard_client):
++    web_server.app.state.isolated_profile = "prime"
++
++    status = dashboard_client.get("/api/status", params={"profile": "architect"})
++    channels = dashboard_client.get(
++        "/api/messaging/platforms",
++        params={"profile": "architect"},
++    )
++    channel_update = dashboard_client.put(
++        "/api/messaging/platforms/telegram",
++        json={"profile": "architect", "enabled": False},
++    )
++    channel_test = dashboard_client.post(
++        "/api/messaging/platforms/telegram/test",
++        params={"profile": "architect"},
++    )
++
++    assert status.status_code == 403
++    assert channels.status_code == 403
++    assert channel_update.status_code == 403
++    assert channel_test.status_code == 403
+diff --git a/web/src/App.tsx b/web/src/App.tsx
+index 8bf6f4ee96e7..1a22c4a21d55 100644
+--- a/web/src/App.tsx
++++ b/web/src/App.tsx
+@@ -798,8 +798,9 @@ export default function App() {
+  * fetchJSON ?profile= injection) silently targeted the newly selected
+  * profile B — the exact stale-target footgun the switcher exists to kill.
+  * Keying by profile resets every page's local state so it refetches under
+- * the new scope. The persistent ChatPage host below handles its own
+- * remount (channel keyed on scopedProfile).
++ * the new scope. The persistent ChatPage host below keeps its own live PTY
++ * channel stable across profile-switcher changes so an in-progress chat is
++ * not torn down by browsing another profile's management pages.
+  */
+ function ProfileKeyedRoutes({ children }: { children: ReactNode }) {
+   const { profile } = useProfileScope();
+diff --git a/web/src/contexts/ProfileProvider.tsx b/web/src/contexts/ProfileProvider.tsx
+index 91c5440e4137..9777ca6b3ce6 100644
+--- a/web/src/contexts/ProfileProvider.tsx
++++ b/web/src/contexts/ProfileProvider.tsx
+@@ -56,6 +56,8 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
+   useEffect(() => {
+     if (urlProfile !== null && urlProfile !== profile) {
+       setManagementProfile(urlProfile);
++      // URL changes are the external source of truth for deep-linked scope.
++      // eslint-disable-next-line react-hooks/set-state-in-effect
+       setProfileState(urlProfile);
+     }
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+@@ -92,11 +94,14 @@ export function ProfileProvider({ children }: { children: ReactNode }) {
+         const active = info.active || "default";
+         setCurrentProfile(current);
+ 
+-        // Deep links (?profile=) win. Otherwise align the switcher with the
+-        // sticky active profile so Chat and management pages match what the
+-        // Profiles page shows as "active" (machine dashboard runs as
+-        // `current`, usually default).
+-        if (urlProfile === null && active !== current) {
++        // Deep links (?profile=) win. Otherwise, only the root/default
++        // dashboard may auto-follow the sticky active profile. Dedicated
++        // per-profile dashboard backends must default to their own profile
++        // scope; on a fleet host the sticky active marker is global and can
++        // legitimately differ from this backend's `current` profile. Letting
++        // an isolated `roo`/`777`/`leopold` dashboard auto-select `default`
++        // makes its sessions and management pages look cross-wired.
++        if (urlProfile === null && current === "default" && active !== current) {
+           setManagementProfile(active);
+           setProfileState(active);
+         }
+diff --git a/web/src/pages/ChatPage.tsx b/web/src/pages/ChatPage.tsx
+index 4e3a6c23151a..82a56486e738 100644
+--- a/web/src/pages/ChatPage.tsx
++++ b/web/src/pages/ChatPage.tsx
+@@ -193,11 +193,25 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
+   // treat the current resume target as part of the PTY identity and rebuild the
+   // terminal session when it changes.
+   const resumeParam = searchParams.get("resume");
+-  // Profile-scoped chat: spawn the PTY under the globally selected
+-  // management profile. Changing it remounts the terminal (key below /
+-  // effect dep) so the user explicitly starts a fresh scoped session.
++  // Profile-scoped chat: bind each live PTY channel to the management profile
++  // selected when that channel is created. Profile switcher changes should
++  // refetch management pages, not kill an in-progress chat. Resume target
++  // changes still create a fresh identity so resume-in-chat works at runtime.
+   const { profile: scopedProfile } = useProfileScope();
+-  const channel = useMemo(() => generateChannelId(), [resumeParam, scopedProfile]);
++  const chatIdentity = useMemo(
++    () => ({
++      resume: resumeParam,
++      channel: generateChannelId(),
++      profile: scopedProfile,
++    }),
++    // Intentionally exclude scopedProfile: changing the management switcher
++    // must not tear down the current chat channel. A new resume target is the
++    // explicit signal to create a fresh chat identity.
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++    [resumeParam],
++  );
++  const channel = chatIdentity.channel;
++  const chatProfile = chatIdentity.profile;
+ 
+   useEffect(() => {
+     if (!resumeParam) return;
+@@ -600,7 +614,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
+     void (async () => {
+       const authParam = await buildWsAuthParam();
+       if (unmounting) return;
+-      const url = buildWsUrl(authParam, resumeParam, channel, scopedProfile);
++      const url = buildWsUrl(authParam, resumeParam, channel, chatProfile);
+       const ws = new WebSocket(url);
+       ws.binaryType = "arraybuffer";
+       wsRef.current = ws;
+@@ -744,7 +758,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
+         copyResetRef.current = null;
+       }
+     };
+-  }, [channel, resumeParam, scopedProfile, reconnectNonce]);
++  }, [channel, resumeParam, chatProfile, reconnectNonce]);
+ 
+   // When the user returns to the chat tab (isActive: false → true), the
+   // terminal host just transitioned from display:none to display:flex.
+@@ -881,7 +895,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
+               "border-t border-current/10",
+             )}
+           >
+-            <ChatSidebar channel={channel} profile={scopedProfile} />
++            <ChatSidebar channel={channel} profile={chatProfile} />
+           </div>
+         </div>
+       </>,
+@@ -967,7 +981,7 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
+             className="flex min-h-0 shrink-0 flex-col overflow-hidden lg:h-full lg:w-80"
+           >
+             <div className="min-h-0 flex-1 overflow-hidden">
+-              <ChatSidebar channel={channel} profile={scopedProfile} />
++              <ChatSidebar channel={channel} profile={chatProfile} />
+             </div>
+           </div>
+         )}

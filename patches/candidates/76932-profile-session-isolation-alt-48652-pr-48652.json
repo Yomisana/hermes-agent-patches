@@ -1,0 +1,31 @@
+{
+  "issueReferences": [
+    76932
+  ],
+  "pullRequest": 48652,
+  "pullRequestUrl": "https://github.com/NousResearch/hermes-agent/pull/48652",
+  "pullRequestAuthor": "0112358DEUS",
+  "title": "fix: isolate dashboard profile backends from cross-profile session reads",
+  "stateAtImport": "open",
+  "mergedAtImport": false,
+  "baseSha": "f1ff8459dbc1135f77c1d113607b80a3f75c81b2",
+  "headSha": "21c21454ebf33b30c128cf61fc775a14629e7ebe",
+  "patchFile": "patches/candidates/76932-profile-session-isolation-alt-48652-pr-48652.patch",
+  "patchSha256": "bc614e0fcebb0409b0c8f3a0fd2b57f6159a5fbcd74c54a515ccc9a4507113f3",
+  "importedForReview": true,
+  "enabled": false,
+  "checkedBaseSha": "fcbd1076a93841fa88855acce810e342a5b78101",
+  "appliesCleanlyToPinnedBase": false,
+  "applyCheckError": [
+    "error: patch failed: apps/desktop/src/app/chat/sidebar/index.tsx:303",
+    "error: apps/desktop/src/app/chat/sidebar/index.tsx: patch does not apply",
+    "error: patch failed: apps/desktop/src/app/chat/sidebar/virtual-session-list.tsx:24",
+    "error: apps/desktop/src/app/chat/sidebar/virtual-session-list.tsx: patch does not apply",
+    "error: apps/desktop/src/app/desktop-controller.tsx: No such file or directory",
+    "error: patch failed: apps/desktop/src/app/session/hooks/use-route-resume.test.tsx:14",
+    "error: apps/desktop/src/app/session/hooks/use-route-resume.test.tsx: patch does not apply",
+    "error: patch failed: apps/desktop/src/app/session/hooks/use-route-resume.ts:147",
+    "error: apps/desktop/src/app/session/hooks/use-route-resume.ts: patch does not apply",
+    "error: apps/desktop/src/app/session/hooks/use-session-actions.ts: No such file or directory"
+  ]
+}

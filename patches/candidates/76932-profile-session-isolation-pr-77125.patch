@@ -1,0 +1,208 @@
+From eb14cb03d8aaae824e816e571c46789daca1752e Mon Sep 17 00:00:00 2001
+From: webtecnica <webtecnica@gmail.com>
+Date: Sun, 2 Aug 2026 19:24:57 -0300
+Subject: [PATCH] fix(security): scope profile endpoints to isolated server
+ profile (#76932)
+
+---
+ hermes_cli/web_routers/profiles.py  |  36 ++++++++-
+ tests/hermes_cli/test_web_server.py | 112 ++++++++++++++++++++++++++++
+ 2 files changed, 145 insertions(+), 3 deletions(-)
+
+diff --git a/hermes_cli/web_routers/profiles.py b/hermes_cli/web_routers/profiles.py
+index 17bd37c1412d..50ef462546c5 100644
+--- a/hermes_cli/web_routers/profiles.py
++++ b/hermes_cli/web_routers/profiles.py
+@@ -54,6 +54,25 @@
+ _write_profile_model = late("_write_profile_model")
+ 
+ 
++def _isolated_profile_scope(profiles_mod) -> Optional[str]:
++    """Return the profile an isolated server is scoped to, or None.
++
++    ``hermes -p <name> serve --isolated`` runs with HERMES_HOME pointing at
++    that profile's directory, and ``get_active_profile_name()`` then returns
++    the real profile name. Such a server must advertise and serve ONLY its own
++    profile's sessions (privacy leak #76932). ``"default"`` (unified
++    ``~/.hermes`` home) and ``"custom"`` (unrecognized HERMES_HOME) do NOT
++    denote an isolated profile server, so unified-server behavior is preserved.
++    """
++    try:
++        name = profiles_mod.get_active_profile_name()
++    except Exception:
++        return None
++    if name and name not in ("default", "custom"):
++        return name
++    return None
++
++
+ @sessions_router.get("/api/profiles/sessions")
+ def get_profiles_sessions(
+     limit: int = Query(20, ge=0),
+@@ -222,15 +241,20 @@ def get_profiles_sessions_sidebar(
+     from hermes_cli import profiles as profiles_mod
+ 
+     # cron + messaging are cross-profile; recents is scoped to recents_profile.
+-    # Scan every profile once regardless (each DB opened a single time).
++    # Scan every profile once regardless (each DB opened a single time). An
++    # isolated server (HERMES_HOME inside a named profile dir) scans only that
++    # profile's DB so its sessions never leak to authenticated clients (#76932).
++    scope = _isolated_profile_scope(profiles_mod)
+     try:
+         infos = profiles_mod.list_profiles()
++        if scope is not None:
++            infos = [info for info in infos if info.name == scope]
+         targets: List[Tuple[str, Path]] = [(info.name, info.path) for info in infos]
+     except Exception:
+         _log.exception("GET /api/profiles/sessions/sidebar: list_profiles failed")
+         targets = []
+     if not targets:
+-        targets.append(("default", profiles_mod.get_profile_dir("default")))
++        targets.append((scope or "default", profiles_mod.get_profile_dir(scope or "default")))
+ 
+     recents_scope = (recents_profile or "all").strip() or "all"
+     recents_exclude_list = [s for s in (recents_exclude or "").split(",") if s.strip()]
+@@ -335,13 +359,19 @@ def _window(rows: List[Dict[str, Any]], cap: int) -> List[Dict[str, Any]]:
+ @router.get("/api/profiles")
+ async def list_profiles_endpoint():
+     from hermes_cli import profiles as profiles_mod
++    scope = _isolated_profile_scope(profiles_mod)
+     try:
+         loop = asyncio.get_running_loop()
+         profiles = await loop.run_in_executor(None, profiles_mod.list_profiles)
++        if scope is not None:
++            profiles = [p for p in profiles if p.name == scope]
+         return {"profiles": [_profile_to_dict(p) for p in profiles]}
+     except Exception:
+         _log.exception("GET /api/profiles failed; falling back to profile directory scan")
+-        return {"profiles": _fallback_profile_dicts(profiles_mod)}
++        fallback = _fallback_profile_dicts(profiles_mod)
++        if scope is not None:
++            fallback = [p for p in fallback if p.get("name") == scope]
++        return {"profiles": fallback}
+ 
+ 
+ @router.post("/api/profiles")
+diff --git a/tests/hermes_cli/test_web_server.py b/tests/hermes_cli/test_web_server.py
+index c7f3c5fc85da..304b30615db0 100644
+--- a/tests/hermes_cli/test_web_server.py
++++ b/tests/hermes_cli/test_web_server.py
+@@ -1816,6 +1816,118 @@ def _setup(self, monkeypatch, _isolate_hermes_home):
+     # --- Profiles ---
+ 
+ 
++    def test_profiles_list_isolated_scope_returns_only_own_profile(
++        self, monkeypatch, tmp_path
++    ):
++        """An isolated server (HERMES_HOME inside a named profile dir) must
++        advertise only its own profile, never the full multi-tenant list
++        (#76932)."""
++        from types import SimpleNamespace
++
++        import hermes_cli.profiles as profiles_mod
++
++        wife_home = tmp_path / "wife"
++        wife_home.mkdir()
++        (wife_home / "state.db").write_bytes(b"")
++        profiles = [
++            SimpleNamespace(name="default", path=str(tmp_path / "default")),
++            SimpleNamespace(name="wife", path=str(wife_home)),
++            SimpleNamespace(name="husband", path=str(tmp_path / "husband")),
++        ]
++        monkeypatch.setattr(profiles_mod, "get_active_profile_name", lambda: "wife")
++        monkeypatch.setattr(profiles_mod, "list_profiles", lambda: profiles)
++
++        resp = self.client.get("/api/profiles")
++        assert resp.status_code == 200
++        names = [p["name"] for p in resp.json()["profiles"]]
++        assert names == ["wife"]
++
++    def test_profiles_sessions_sidebar_isolated_scope_queries_only_own_db(
++        self, monkeypatch, tmp_path
++    ):
++        """The sidebar must open only the scoped profile's state.db on an
++        isolated server (#76932)."""
++        from types import SimpleNamespace
++
++        import hermes_cli.profiles as profiles_mod
++        import hermes_state
++
++        wife_home = tmp_path / "wife"
++        wife_home.mkdir()
++        (wife_home / "state.db").write_bytes(b"")
++        profiles = [
++            SimpleNamespace(name="default", path=str(tmp_path / "default")),
++            SimpleNamespace(name="wife", path=str(wife_home)),
++            SimpleNamespace(name="husband", path=str(tmp_path / "husband")),
++        ]
++        monkeypatch.setattr(profiles_mod, "get_active_profile_name", lambda: "wife")
++        monkeypatch.setattr(profiles_mod, "list_profiles", lambda: profiles)
++
++        opened = []
++
++        class _FakeDB:
++            def __init__(self, db_path, read_only=False):
++                opened.append(str(db_path))
++
++            def list_sessions_rich(self, **kwargs):
++                return []
++
++            def close(self):
++                pass
++
++        monkeypatch.setattr(hermes_state, "SessionDB", _FakeDB)
++
++        resp = self.client.get("/api/profiles/sessions/sidebar")
++        assert resp.status_code == 200
++        assert opened == [str(wife_home / "state.db")]
++        body = resp.json()
++        assert body["recents"]["sessions"] == []
++        assert body["cron"]["sessions"] == []
++        assert body["errors"] == []
++
++    def test_profiles_unified_server_still_lists_all_profiles(
++        self, monkeypatch, tmp_path
++    ):
++        """Unified HERMES_HOME (get_active_profile_name() == 'default') keeps
++        returning the full profile list and scanning all profile DBs — the
++        pre-fix behavior (#76932)."""
++        from types import SimpleNamespace
++
++        import hermes_cli.profiles as profiles_mod
++        import hermes_state
++
++        homes = {}
++        for name in ("default", "wife", "husband"):
++            home = tmp_path / name
++            home.mkdir()
++            (home / "state.db").write_bytes(b"")
++            homes[name] = home
++        profiles = [SimpleNamespace(name=name, path=str(homes[name])) for name in homes]
++        monkeypatch.setattr(profiles_mod, "get_active_profile_name", lambda: "default")
++        monkeypatch.setattr(profiles_mod, "list_profiles", lambda: profiles)
++
++        resp = self.client.get("/api/profiles")
++        assert resp.status_code == 200
++        names = [p["name"] for p in resp.json()["profiles"]]
++        assert names == ["default", "wife", "husband"]
++
++        opened = []
++
++        class _FakeDB:
++            def __init__(self, db_path, read_only=False):
++                opened.append(str(db_path))
++
++            def list_sessions_rich(self, **kwargs):
++                return []
++
++            def close(self):
++                pass
++
++        monkeypatch.setattr(hermes_state, "SessionDB", _FakeDB)
++
++        resp = self.client.get("/api/profiles/sessions/sidebar")
++        assert resp.status_code == 200
++        assert sorted(opened) == sorted(str(h / "state.db") for h in homes.values())
+ 
+     def test_profiles_create_builder_mcp_auth_is_profile_scoped(
+         self, monkeypatch

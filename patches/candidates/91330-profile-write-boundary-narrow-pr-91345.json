@@ -1,0 +1,20 @@
+{
+  "issueReferences": [
+    91330
+  ],
+  "pullRequest": 91345,
+  "pullRequestUrl": "https://github.com/NousResearch/hermes-agent/pull/91345",
+  "pullRequestAuthor": "fangliquanflq",
+  "title": "fix(profiles): stop isolated dashboards from enabling cross-profile prompt injection",
+  "stateAtImport": "open",
+  "mergedAtImport": false,
+  "baseSha": "524b062289e9d64b2112b8c9caaf0c7f59cb463d",
+  "headSha": "17021faaa90514264dc2da8f4eb48b9a11e32c66",
+  "patchFile": "patches/candidates/91330-profile-write-boundary-narrow-pr-91345.patch",
+  "patchSha256": "1afc55039049438ab7753640d546bc100d85f87bec1b1e774440a5ad38b32e13",
+  "importedForReview": true,
+  "enabled": false,
+  "checkedBaseSha": "fcbd1076a93841fa88855acce810e342a5b78101",
+  "appliesCleanlyToPinnedBase": true,
+  "applyCheckError": null
+}

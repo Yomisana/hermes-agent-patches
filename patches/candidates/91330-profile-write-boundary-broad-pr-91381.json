@@ -1,0 +1,20 @@
+{
+  "issueReferences": [
+    91330
+  ],
+  "pullRequest": 91381,
+  "pullRequestUrl": "https://github.com/NousResearch/hermes-agent/pull/91381",
+  "pullRequestAuthor": "KeyArgo",
+  "title": "fix(profiles): scope profile endpoints to an isolated dashboard's profile",
+  "stateAtImport": "open",
+  "mergedAtImport": false,
+  "baseSha": "fc9cbc872d8050c22f1192b16bc5ff4aed471e10",
+  "headSha": "939374ce079405b0d73ed4685ecb5faa097ad49a",
+  "patchFile": "patches/candidates/91330-profile-write-boundary-broad-pr-91381.patch",
+  "patchSha256": "8f757362c6ec49d9eaa1ec346ee2c7256f8fb34bf5cdea430ffea1a0db0d3dfd",
+  "importedForReview": true,
+  "enabled": false,
+  "checkedBaseSha": "fcbd1076a93841fa88855acce810e342a5b78101",
+  "appliesCleanlyToPinnedBase": true,
+  "applyCheckError": null
+}

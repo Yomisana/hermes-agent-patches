@@ -1,0 +1,644 @@
+From 333e44d3c8d15e4baf3f9ac49d576ff7bd29ca19 Mon Sep 17 00:00:00 2001
+From: Argo <argo@argobox.com>
+Date: Thu, 20 Aug 2026 23:57:25 -0600
+Subject: [PATCH 1/3] fix(desktop): scope profile endpoints to an isolated
+ dashboard's profile
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Root cause: every /api/profiles/{name}/* endpoint resolved and operated on
+ANY named profile with no scope check. A dashboard launched with `--isolated`
+(which is documented to run a server "scoped to that profile") could
+therefore read, rewrite, export, or even delete a DIFFERENT profile's data —
+SOUL.md persona injection (#91330), and equally model/description mutation,
+config export (config/.env exfiltration), and profile deletion.
+
+Impact: an attacker able to reach an isolated dashboard can inject a
+malicious persona into another profile, exfiltrate its config/secrets via
+export, or destroy it.
+
+Fix: track isolation explicitly. `--isolated` is threaded from the launch
+flag through start_server() into app.state.isolated. All {name}-scoped
+profiles endpoints (soul GET/PUT, description, model, describe-auto, export,
+delete, rename, open-terminal, setup-command, desktop-overlay) route through
+_assert_profile_in_scope(), which returns 403 when the server is isolated and
+the requested profile is not the one it is scoped to. Isolation is signalled
+by the flag itself, not inferred from the profile name, so an isolated server
+scoped to the default profile is protected too. The unified machine dashboard
+(isolated=False) keeps its intentional machine-wide cross-profile management
+behavior; an isolated server's own profile still works.
+
+Regression: 7 new tests cover cross-profile soul read/write refusal for a
+named isolated profile, the default-profile isolated case, cross-profile
+delete/export refusal, same-profile success, the machine-dashboard controls,
+and isolated-state teardown.
+
+Deferred (codex P2, written rationale): local desktop per-profile backends
+are launched `--profile X serve` without `--isolated` (apps/desktop/electron/
+backend-command.ts serveBackendArgs), so they retain cross-profile access.
+Marking those launches `--isolated` is the intended follow-up but
+deliberately NOT done here: the desktop profile switcher routes SOUL/settings
+edits for a non-active profile through the active per-profile backend, and
+that cross-profile UX must be validated before this PR enforces the boundary
+on it — this PR scopes the fix to the reported `--isolated` dashboard vector
+and leaves the desktop-launcher extension to maintainers who can verify the
+desktop routing behavior.
+
+Closes #91330
+---
+ hermes_cli/main.py                            |   1 +
+ hermes_cli/web_routers/profiles.py            |  48 ++++++
+ hermes_cli/web_server.py                      |  31 ++++
+ .../test_web_profile_soul_writes.py           | 141 ++++++++++++++++++
+ 4 files changed, 221 insertions(+)
+
+diff --git a/hermes_cli/main.py b/hermes_cli/main.py
+index 0c7c51608fa5..21db267f72da 100644
+--- a/hermes_cli/main.py
++++ b/hermes_cli/main.py
+@@ -11505,6 +11505,7 @@ def cmd_dashboard(args):
+         allow_public=getattr(args, "insecure", False),
+         initial_profile=getattr(args, "open_profile", "") or "",
+         headless=_headless_backend,
++        isolated=getattr(args, "isolated", False),
+         ssh_session_token=_ssh_session_token,
+         ssh_owner_nonce=_ssh_owner_nonce,
+     )
+diff --git a/hermes_cli/web_routers/profiles.py b/hermes_cli/web_routers/profiles.py
+index 77ff1ad50aa1..bcf10dfa969e 100644
+--- a/hermes_cli/web_routers/profiles.py
++++ b/hermes_cli/web_routers/profiles.py
+@@ -71,9 +71,11 @@ def _warn_profile_read_error(profile: str, exc: Exception) -> None:
+ # Late-bound web_server helpers (resolved at call time; cycle-safe,
+ # monkeypatch-transparent).
+ _cron_profile_home = late("_cron_profile_home")
++_current_profile_name = late("_current_profile_name")
+ _disable_unselected_skills = late("_disable_unselected_skills")
+ _fallback_profile_dicts = late("_fallback_profile_dicts")
+ _hub_action_name = late("_hub_action_name")
++_is_isolated_server = late("_is_isolated_server")
+ _open_session_db_at_path = late("_open_session_db_at_path")
+ _profile_setup_command = late("_profile_setup_command")
+ _profile_to_dict = late("_profile_to_dict")
+@@ -941,11 +943,13 @@ async def set_active_profile_endpoint(body: ProfileActiveUpdate):
+ 
+ @router.get("/api/profiles/{name}/setup-command")
+ async def get_profile_setup_command(name: str):
++    _assert_profile_in_scope(name)
+     return {"command": _profile_setup_command(name)}
+ 
+ 
+ @router.post("/api/profiles/{name}/open-terminal")
+ async def open_profile_terminal_endpoint(name: str):
++    _assert_profile_in_scope(name)
+     try:
+         command = _profile_setup_command(name)
+ 
+@@ -1000,6 +1004,7 @@ async def open_profile_terminal_endpoint(name: str):
+ 
+ @router.patch("/api/profiles/{name}")
+ async def rename_profile_endpoint(name: str, body: ProfileRename):
++    _assert_profile_in_scope(name)
+     from hermes_cli import profiles as profiles_mod
+     try:
+         path = profiles_mod.rename_profile(name, body.new_name)
+@@ -1036,6 +1041,7 @@ async def delete_profile_endpoint(name: str):
+     """Delete a profile. The dashboard collects the user's confirmation in
+     its own dialog before this request, so we always pass ``yes=True`` to
+     skip the CLI's interactive prompt."""
++    _assert_profile_in_scope(name)
+     from hermes_cli import profiles as profiles_mod
+     try:
+         path = profiles_mod.delete_profile(name, yes=True)
+@@ -1049,8 +1055,44 @@ async def delete_profile_endpoint(name: str):
+     return {"ok": True, "path": str(path)}
+ 
+ 
++def _assert_profile_in_scope(name: str) -> None:
++    """Reject cross-profile access from a scoped (isolated) server.
++
++    A dashboard/serve process launched with ``--isolated`` is scoped to a
++    single profile (its own HERMES_HOME). Such a server must not read,
++    mutate, export, or destroy another profile's data: that is the
++    prompt/identity-injection and data-exfiltration boundary behind #91330
++    (an attacker who can reach an isolated dashboard could otherwise rewrite
++    a different profile's persona — or export its config/secrets — to inject
++    a malicious prompt or steal data).
++
++    Isolation is tracked explicitly on ``app.state.isolated`` (threaded from
++    the ``--isolated`` launch flag through :func:`start_server`), not inferred
++    from the profile name — an isolated server may be scoped to the default
++    profile too, and must still be restricted. The default (unified) machine
++    dashboard (isolated=False) is *intentionally* a machine-wide management
++    surface, so this guard is a no-op there. Every ``/api/profiles/{name}/*``
++    read/mutate/export/delete endpoint routes through this guard.
++    """
++    if not _is_isolated_server():
++        # Unified machine dashboard: cross-profile management is by design.
++        return
++    current = _current_profile_name()
++    # Asking for the very profile this server is scoped to is always fine.
++    if current == name:
++        return
++    raise HTTPException(
++        status_code=403,
++        detail=(
++            f"This dashboard is isolated to profile '{current}'. "
++            f"Refusing to access another profile ('{name}')."
++        ),
++    )
++
++
+ @router.get("/api/profiles/{name}/soul")
+ async def get_profile_soul(name: str):
++    _assert_profile_in_scope(name)
+     soul_path = _resolve_profile_dir(name) / "SOUL.md"
+     if soul_path.exists():
+         try:
+@@ -1062,6 +1104,7 @@ async def get_profile_soul(name: str):
+ 
+ @router.put("/api/profiles/{name}/soul")
+ async def update_profile_soul(name: str, body: ProfileSoulUpdate):
++    _assert_profile_in_scope(name)
+     soul_path = _resolve_profile_dir(name) / "SOUL.md"
+     try:
+         from utils import atomic_write_text
+@@ -1097,6 +1140,7 @@ async def update_profile_description_endpoint(name: str, body: ProfileDescriptio
+     user-authored description (``description_auto: false``) so the
+     auto-describer won't overwrite it on a sweep.
+     """
++    _assert_profile_in_scope(name)
+     from hermes_cli import profiles as profiles_mod
+     profile_dir = _resolve_profile_dir(name)
+     text = (body.description or "").strip()
+@@ -1119,6 +1163,7 @@ async def update_profile_model_endpoint(name: str, body: ProfileModelUpdate):
+     active profile. Mirrors ``POST /api/model/set`` (main scope) but scoped
+     to the named profile via the HERMES_HOME override.
+     """
++    _assert_profile_in_scope(name)
+     profile_dir = _resolve_profile_dir(name)
+     provider = (body.provider or "").strip()
+     model = (body.model or "").strip()
+@@ -1142,6 +1187,7 @@ async def describe_profile_auto_endpoint(name: str, body: ProfileDescribeAuto):
+     ``ok: false`` with a reason rather than an HTTP error so the UI can
+     surface it inline and let the operator fix config and retry.
+     """
++    _assert_profile_in_scope(name)
+     _resolve_profile_dir(name)
+     try:
+         from hermes_cli import profile_describer
+@@ -1169,6 +1215,7 @@ async def describe_profile_auto_endpoint(name: str, body: ProfileDescribeAuto):
+ 
+ @router.post("/api/profiles/{name}/export")
+ async def export_profile_endpoint(name: str, body: ProfileExport):
++    _assert_profile_in_scope(name)
+     from hermes_cli import profiles as profiles_mod
+ 
+     output = (body.output or "").strip()
+@@ -1252,6 +1299,7 @@ async def import_profile_endpoint(body: ProfileImport):
+ async def get_profile_desktop_overlay(name: str):
+     """The desktop appearance/interface overlay bundled with an imported
+     profile (``desktop.json`` at the profile root), or ``exists: false``."""
++    _assert_profile_in_scope(name)
+     overlay_path = _resolve_profile_dir(name) / "desktop.json"
+     if not overlay_path.is_file():
+         return {"exists": False, "desktop": None}
+diff --git a/hermes_cli/web_server.py b/hermes_cli/web_server.py
+index cc2449988086..ced2e111e366 100644
+--- a/hermes_cli/web_server.py
++++ b/hermes_cli/web_server.py
+@@ -14658,6 +14658,28 @@ def _safe(callable_, default):
+     return profiles
+ 
+ 
++def _is_isolated_server() -> bool:
++    """True when this server was launched with ``--isolated``.
++
++    Threaded from the ``--isolated`` flag through :func:`start_server` into
++    ``app.state.isolated``. Defaults to False so a server that never ran
++    ``start_server`` (e.g. a bare TestClient without the helper setting it)
++    is treated as the unified machine dashboard, which is the safe
++    non-restricting default.
++    """
++    return bool(getattr(app.state, "isolated", False))
++
++
++def _current_profile_name() -> str:
++    """Return the profile this dashboard process is scoped to (or 'default')."""
++    from hermes_cli import profiles as profiles_mod
++
++    try:
++        return profiles_mod.get_active_profile_name() or "default"
++    except Exception:
++        return "default"
++
++
+ def _resolve_profile_dir(name: str) -> Path:
+     """Validate ``name`` and resolve to its directory or raise an HTTPException."""
+     from hermes_cli import profiles as profiles_mod
+@@ -18852,6 +18874,7 @@ def start_server(
+     allow_public: bool = False,
+     initial_profile: str = "",
+     headless: bool = False,
++    isolated: bool = False,
+     ssh_session_token: Optional[str] = None,
+     ssh_owner_nonce: Optional[str] = None,
+ ):
+@@ -18866,11 +18889,19 @@ def start_server(
+     build and no SPA mount (mount_spa() honours ``HERMES_SERVE_HEADLESS``), so
+     the banner announces the bind rather than a browser URL.
+ 
++    ``isolated`` marks a server launched with ``--isolated``: it is scoped
++    to a single profile (its own HERMES_HOME) and must not read, mutate,
++    export, or delete another profile's data (enforced by the per-profile
++    guard ``_assert_profile_in_scope`` on the profiles router). The unified
++    machine dashboard (isolated=False) remains a machine-wide management
++    surface.
++
+     ``ssh_session_token`` and ``ssh_owner_nonce`` are process-local Desktop SSH
+     bootstrap state. Neither is persisted or exported to child processes.
+     """
+     _apply_ssh_session_token(ssh_session_token or "")
+     _apply_ssh_owner_nonce(ssh_owner_nonce)
++    app.state.isolated = bool(isolated)
+ 
+     # Raise RLIMIT_NOFILE for dashboard-mode starts that don't route through
+     # the `serve` path in main.py (which applies the same floor). Canonical
+diff --git a/tests/hermes_cli/test_web_profile_soul_writes.py b/tests/hermes_cli/test_web_profile_soul_writes.py
+index 06f209d7f367..b2e24f442658 100644
+--- a/tests/hermes_cli/test_web_profile_soul_writes.py
++++ b/tests/hermes_cli/test_web_profile_soul_writes.py
+@@ -12,6 +12,7 @@
+ 
+ from __future__ import annotations
+ 
++import contextlib
+ import os
+ import stat
+ import sys
+@@ -129,3 +130,143 @@ def test_created_file_mode_is_not_tightened(self, client, profile_dir: Path):
+         assert r.status_code == 200, r.text
+         mode = stat.S_IMODE(soul.stat().st_mode)
+         assert mode == 0o644, f"first save created SOUL.md as {oct(mode)}"
++
++
++class TestIsolatedProfileSoulScope:
++    """An isolated (``--isolated``) dashboard scoped to one named profile must
++    not read or write another profile's SOUL.md (#91330).
++
++    The unified machine dashboard is intentionally a machine-wide management
++    surface (cross-profile access is by design). But a server launched with
++    ``--isolated`` from a named profile runs scoped to that profile, and
++    letting it rewrite another profile's persona is a prompt-injection vector.
++    """
++
++    @pytest.fixture()
++    def isolated_home(self, tmp_path, monkeypatch):
++        """A hermes root with two real profiles; server scoped to ``alice``."""
++        monkeypatch.setenv("HOME", str(tmp_path))
++        profiles_root = tmp_path / ".hermes" / "profiles"
++        for p in ("alice", "bob"):
++            (profiles_root / p).mkdir(parents=True, exist_ok=True)
++        monkeypatch.setenv("HERMES_HOME", str(profiles_root / "alice"))
++        return profiles_root
++
++    @contextlib.contextmanager
++    def _client(self, monkeypatch, *, isolated: bool):
++        """A TestClient with the shared app scoped as isolated or not.
++
++        ``app.state.isolated`` is a process-global; snapshot it and restore it
++        on exit so an isolated test can't leak into a later non-isolated test
++        in the same process (its only default is when the attribute is never
++        set at all).
++        """
++        monkeypatch.setenv("HERMES_DASHBOARD_SESSION_TOKEN", "soul-test-token")
++        from hermes_cli import web_server
++
++        prev = getattr(web_server.app.state, "isolated", None)
++        had = hasattr(web_server.app.state, "isolated")
++        web_server.app.state.isolated = isolated
++        c = TestClient(web_server.app, raise_server_exceptions=False)
++        c.headers["Authorization"] = "Bearer soul-test-token"
++        try:
++            with c:
++                yield c
++        finally:
++            if had:
++                web_server.app.state.isolated = prev
++            else:
++                delattr(web_server.app.state, "isolated")
++
++    def test_cross_profile_soul_write_refused(self, isolated_home, monkeypatch):
++        bob = isolated_home / "bob"
++        (bob / "SOUL.md").write_text("# Bob's persona\n", encoding="utf-8")
++        before = (bob / "SOUL.md").read_text(encoding="utf-8")
++
++        with self._client(monkeypatch, isolated=True) as c:
++            r = c.put("/api/profiles/bob/soul", json={"content": "# Pwned\n"})
++
++        assert r.status_code == 403, r.text
++        # Bob's persona must be untouched.
++        assert (bob / "SOUL.md").read_text(encoding="utf-8") == before
++
++    def test_cross_profile_soul_read_refused(self, isolated_home, monkeypatch):
++        (isolated_home / "bob" / "SOUL.md").write_text("# Bob\n", encoding="utf-8")
++
++        with self._client(monkeypatch, isolated=True) as c:
++            r = c.get("/api/profiles/bob/soul")
++
++        assert r.status_code == 403, r.text
++
++    def test_isolated_default_profile_blocks_named_profiles(
++        self, tmp_path, monkeypatch
++    ):
++        """An isolated server scoped to the DEFAULT profile must still refuse
++        cross-profile persona access (#91330 P1)."""
++        monkeypatch.setenv("HOME", str(tmp_path))
++        profiles_root = tmp_path / ".hermes" / "profiles"
++        bob = profiles_root / "bob"
++        bob.mkdir(parents=True, exist_ok=True)
++        (bob / "SOUL.md").write_text("# Bob\n", encoding="utf-8")
++        # Isolated server running as the default (root) profile.
++        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
++
++        with self._client(monkeypatch, isolated=True) as c:
++            r = c.put("/api/profiles/bob/soul", json={"content": "# nope\n"})
++
++        assert r.status_code == 403, r.text
++        assert (bob / "SOUL.md").read_text(encoding="utf-8") == "# Bob\n"
++
++    def test_same_profile_soul_still_works(self, isolated_home, monkeypatch):
++        with self._client(monkeypatch, isolated=True) as c:
++            put = c.put("/api/profiles/alice/soul", json={"content": SOUL})
++            get = c.get("/api/profiles/alice/soul")
++
++        assert put.status_code == 200, put.text
++        assert get.status_code == 200, get.text
++        assert get.json()["content"] == SOUL
++
++    def test_machine_dashboard_keeps_cross_profile_access(self, tmp_path, monkeypatch):
++        """Control: the default machine dashboard is intentionally machine-wide
++        and must not start refusing cross-profile SOUL edits."""
++        monkeypatch.setenv("HOME", str(tmp_path))
++        profiles_root = tmp_path / ".hermes" / "profiles"
++        bob = profiles_root / "bob"
++        bob.mkdir(parents=True, exist_ok=True)
++        # Machine dashboard runs from the root home, NOT isolated.
++        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
++
++        with self._client(monkeypatch, isolated=False) as c:
++            r = c.put("/api/profiles/bob/soul", json={"content": "# ok\n"})
++
++        assert r.status_code == 200, r.text
++        assert (bob / "SOUL.md").read_text(encoding="utf-8") == "# ok\n"
++
++    def test_cross_profile_endpoints_gated_in_isolated(self, isolated_home, monkeypatch):
++        """DELETE/rename/model/export for another profile are refused from an
++        isolated server — the full isolation boundary, not just SOUL.md."""
++        (isolated_home / "bob" / "SOUL.md").write_text("# Bob\n", encoding="utf-8")
++
++        with self._client(monkeypatch, isolated=True) as c:
++            d = c.delete("/api/profiles/bob")
++            x = c.post("/api/profiles/bob/export", json={})
++
++        assert d.status_code == 403, d.text
++        assert x.status_code == 403, x.text
++
++    def test_cross_profile_endpoints_work_on_machine_dashboard(
++        self, tmp_path, monkeypatch
++    ):
++        """Control: the unified machine dashboard keeps cross-profile
++        management (delete/export) — the boundary only bites when isolated."""
++        monkeypatch.setenv("HOME", str(tmp_path))
++        profiles_root = tmp_path / ".hermes" / "profiles"
++        (profiles_root / "bob").mkdir(parents=True, exist_ok=True)
++        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
++
++        with self._client(monkeypatch, isolated=False) as c:
++            d = c.delete("/api/profiles/bob")
++
++        # Machine dashboard may delete another profile.
++        assert d.status_code == 200, d.text
++        assert not (profiles_root / "bob").exists()
+
+From 838b88812353f3c0f3124a63967dd81bf80cffbd Mon Sep 17 00:00:00 2001
+From: KeyArgo <daniel.laforce@argobox.com>
+Date: Fri, 21 Aug 2026 03:12:27 -0600
+Subject: [PATCH 2/3] fix(profiles): deny machine-global control-plane ops on
+ isolated servers
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Review follow-up to #91381 (andrexibiza review, stop-the-line bypass):
+guarding only the {name}-scoped destination routes was insufficient because
+other routes can designate a protected profile as a READ/COPY source.
+
+- POST /api/profiles: refused outright when isolated. Every clone source is
+  an authority-bearing selector — explicit clone_from, clone_all, AND the
+  implicit "default" source — so an isolated client could copy a sibling
+  profile's config/.env/SOUL/skills into a new profile it controls.
+- POST /api/profiles/import: archive import creates a full profile directory
+  under the caller's control plane; machine-global mutation, denied.
+- POST /api/profiles/active: switching the machine-wide active profile
+  regains cross-profile authority via CLI/gateway routing; denied.
+
+Fail-closed per the reviewer's invariant: an authenticated client of an
+isolated server may exercise only the isolated profile's authority; path,
+query, body, implicit-source selectors cannot regain sibling authority.
+The unified machine dashboard keeps all three operations by design.
+
+Adversarial witnesses added per the review spec: Alice isolated + Bob with
+a sentinel .env + POST clone_from:bob asserts 403, no destination created,
+sentinel never leaves Bob; implicit default-source clone-all covered;
+import/active refusals; machine-dashboard control test.
+
+17/17 tests pass (12 prior + 5 new).
+---
+ hermes_cli/web_routers/profiles.py            | 43 +++++++++++
+ .../test_web_profile_soul_writes.py           | 73 +++++++++++++++++++
+ 2 files changed, 116 insertions(+)
+
+diff --git a/hermes_cli/web_routers/profiles.py b/hermes_cli/web_routers/profiles.py
+index bcf10dfa969e..a23e535e915a 100644
+--- a/hermes_cli/web_routers/profiles.py
++++ b/hermes_cli/web_routers/profiles.py
+@@ -789,6 +789,12 @@ async def list_profiles_endpoint():
+ 
+ @router.post("/api/profiles")
+ async def create_profile_endpoint(body: ProfileCreate):
++    # Every clone source (explicit clone_from, clone_all, and the implicit
++    # "default") is an authority-bearing profile selector: cloning READS the
++    # source profile's config/.env/SOUL/skills. On an isolated server the
++    # source may be a sibling profile, so creation is refused outright before
++    # any source file is touched (#91330 review).
++    _assert_machine_control_plane_allowed("profile create")
+     from hermes_cli import profiles as profiles_mod
+     explicit_source = (body.clone_from or "").strip()
+     if explicit_source:
+@@ -928,6 +934,9 @@ async def set_active_profile_endpoint(body: ProfileActiveUpdate):
+     Note: this does not retarget the already-running dashboard process —
+     it changes which profile subsequent CLI commands and gateways use.
+     """
++    # Switching the machine-wide active profile is a control-plane operation
++    # over the whole profile set — refused on an isolated server (#91330 review).
++    _assert_machine_control_plane_allowed("active-profile switch")
+     from hermes_cli import profiles as profiles_mod
+     try:
+         profiles_mod.set_active_profile(body.name)
+@@ -1090,6 +1099,37 @@ def _assert_profile_in_scope(name: str) -> None:
+     )
+ 
+ 
++def _assert_machine_control_plane_allowed(action: str) -> None:
++    """Refuse machine-global profile operations from a scoped (isolated) server.
++
++    Profile creation, archive import, and active-profile switching are
++    control-plane operations over the WHOLE machine's profile set, not over a
++    single ``{name}`` target: ``POST /api/profiles`` accepts caller-controlled
++    ``clone_from``/``clone_all`` (and an implicit ``default`` source), so a
++    client of an isolated server could copy a sibling profile's
++    config/.env/SOUL/skills into a new profile it legitimately controls —
++    reading the protected profile through the clone source even though every
++    destination-side route is guarded (#91330 review, "authority-bearing
++    selectors"). Import archives and active-profile switches carry the same
++    cross-profile authority shape.
++
++    An isolated server is scoped to exactly one profile, so these operations
++    are denied outright (fail-closed) instead of partially permitted. The
++    unified machine dashboard keeps them by design.
++    """
++    if not _is_isolated_server():
++        return
++    current = _current_profile_name()
++    raise HTTPException(
++        status_code=403,
++        detail=(
++            f"This dashboard is isolated to profile '{current}'. "
++            f"Refusing machine-global profile operation ({action})."
++        ),
++    )
++
++
++
+ @router.get("/api/profiles/{name}/soul")
+ async def get_profile_soul(name: str):
+     _assert_profile_in_scope(name)
+@@ -1247,6 +1287,9 @@ async def export_profile_endpoint(name: str, body: ProfileExport):
+ 
+ @router.post("/api/profiles/import")
+ async def import_profile_endpoint(body: ProfileImport):
++    # An imported archive becomes a full profile directory under this server's
++    # control plane — machine-global mutation, refused when isolated.
++    _assert_machine_control_plane_allowed("profile import")
+     from hermes_cli import profiles as profiles_mod
+ 
+     archive = (body.archive or "").strip()
+diff --git a/tests/hermes_cli/test_web_profile_soul_writes.py b/tests/hermes_cli/test_web_profile_soul_writes.py
+index b2e24f442658..ff2a82c38856 100644
+--- a/tests/hermes_cli/test_web_profile_soul_writes.py
++++ b/tests/hermes_cli/test_web_profile_soul_writes.py
+@@ -254,6 +254,79 @@ def test_cross_profile_endpoints_gated_in_isolated(self, isolated_home, monkeypa
+         assert d.status_code == 403, d.text
+         assert x.status_code == 403, x.text
+ 
++    def test_create_with_clone_from_sibling_refused(self, isolated_home, monkeypatch):
++        """Adversarial witness (#91330 review, stop-the-line bypass): an
++        isolated server must not read a sibling profile through
++        ``POST /api/profiles`` ``clone_from`` — cloning copies the source's
++        config/.env/SOUL/skills into a new profile the client controls."""
++        bob = isolated_home / "bob"
++        bob.mkdir(parents=True, exist_ok=True)
++        sentinel = "SECRET_SENTINEL_NEVER_COPY_ME=1\n"
++        (bob / ".env").write_text(sentinel, encoding="utf-8")
++        (bob / "SOUL.md").write_text("# Bob\n", encoding="utf-8")
++
++        with self._client(monkeypatch, isolated=True) as c:
++            r = c.post(
++                "/api/profiles",
++                json={"name": "evil", "clone_from": "bob"},
++            )
++
++        assert r.status_code == 403, r.text
++        # No destination profile was created...
++        assert not (isolated_home / "evil").exists()
++        # ...and the sentinel never left Bob.
++        found = [str(p) for p in isolated_home.rglob("*") if p.is_file() and sentinel in p.read_text(encoding="utf-8", errors="ignore")]
++        assert found == [str(bob / ".env")], f"sentinel leaked to: {found}"
++
++    def test_create_clone_all_implicit_default_refused(self, tmp_path, monkeypatch):
++        """The implicit clone-all source ('default') is also authority-bearing:
++        an isolated server scoped to a named profile must not full-copy the
++        machine default profile without ever naming it."""
++        monkeypatch.setenv("HOME", str(tmp_path))
++        hermes_root = tmp_path / ".hermes"
++        hermes_root.mkdir(parents=True, exist_ok=True)
++        profiles_root = hermes_root / "profiles"
++        default_profile = hermes_root  # root HERMES_HOME *is* the default profile
++        sentinel = "DEFAULT_SECRET_SENTINEL=1\n"
++        (default_profile / ".env").write_text(sentinel, encoding="utf-8")
++        (profiles_root / "alice").mkdir(parents=True, exist_ok=True)
++        monkeypatch.setenv("HERMES_HOME", str(profiles_root / "alice"))
++
++        with self._client(monkeypatch, isolated=True) as c:
++            r = c.post("/api/profiles", json={"name": "evil", "clone_all": True})
++
++        assert r.status_code == 403, r.text
++        assert not (profiles_root / "evil").exists()
++
++    def test_import_refused_when_isolated(self, isolated_home, monkeypatch):
++        """Archive import creates a full profile directory — machine-global
++        control-plane mutation, refused on an isolated server."""
++        with self._client(monkeypatch, isolated=True) as c:
++            r = c.post("/api/profiles/import", json={"archive": "/tmp/nope.tar.gz"})
++
++        assert r.status_code == 403, r.text
++
++    def test_active_switch_refused_when_isolated(self, isolated_home, monkeypatch):
++        """Switching the machine-wide active profile regains authority over
++        other profiles' CLI/gateway routing — refused when isolated."""
++        with self._client(monkeypatch, isolated=True) as c:
++            r = c.post("/api/profiles/active", json={"name": "bob"})
++
++        assert r.status_code == 403, r.text
++
++    def test_control_plane_works_on_machine_dashboard(self, tmp_path, monkeypatch):
++        """Control: the unified machine dashboard keeps profile creation and
++        active-profile switching (intentional machine-wide management)."""
++        monkeypatch.setenv("HOME", str(tmp_path))
++        profiles_root = tmp_path / ".hermes" / "profiles"
++        profiles_root.mkdir(parents=True, exist_ok=True)
++        monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
++
++        with self._client(monkeypatch, isolated=False) as c:
++            r = c.post("/api/profiles", json={"name": "fresh"})
++
++        assert r.status_code == 200, r.text
++
+     def test_cross_profile_endpoints_work_on_machine_dashboard(
+         self, tmp_path, monkeypatch
+     ):
+
+From 939374ce079405b0d73ed4685ecb5faa097ad49a Mon Sep 17 00:00:00 2001
+From: KeyArgo <daniel.laforce@argobox.com>
+Date: Fri, 21 Aug 2026 08:13:28 -0600
+Subject: [PATCH 3/3] chore: map argo@argobox.com contributor email
+
+CI check-attribution flagged Argo <argo@argobox.com> (author of
+333e44d3c) as unmapped; daniel.laforce@argobox.com was already mapped
+to KeyArgo via legacy AUTHOR_MAP. Maps the machine identity to the
+same KeyArgo account.
+---
+ contributors/emails/argo@argobox.com | 2 ++
+ 1 file changed, 2 insertions(+)
+ create mode 100644 contributors/emails/argo@argobox.com
+
+diff --git a/contributors/emails/argo@argobox.com b/contributors/emails/argo@argobox.com
+new file mode 100644
+index 000000000000..2373d19cb32a
+--- /dev/null
++++ b/contributors/emails/argo@argobox.com
+@@ -0,0 +1,2 @@
++KeyArgo
++# author identity for PR #91381 commits (Argo = KeyArgo machine identity)

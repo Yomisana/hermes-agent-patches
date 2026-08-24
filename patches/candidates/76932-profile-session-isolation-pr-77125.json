@@ -1,0 +1,23 @@
+{
+  "issueReferences": [
+    76932
+  ],
+  "pullRequest": 77125,
+  "pullRequestUrl": "https://github.com/NousResearch/hermes-agent/pull/77125",
+  "pullRequestAuthor": "webtecnica",
+  "title": "fix(security): scope profile endpoints to isolated server profile",
+  "stateAtImport": "open",
+  "mergedAtImport": false,
+  "baseSha": "eb6214300693d2f3472d605b76282989d334bce9",
+  "headSha": "eb14cb03d8aaae824e816e571c46789daca1752e",
+  "patchFile": "patches/candidates/76932-profile-session-isolation-pr-77125.patch",
+  "patchSha256": "919baf3d9b4a8f0169bb53def0613ce1048564bfde031989ffd7025f12fa0b7f",
+  "importedForReview": true,
+  "enabled": false,
+  "checkedBaseSha": "fcbd1076a93841fa88855acce810e342a5b78101",
+  "appliesCleanlyToPinnedBase": false,
+  "applyCheckError": [
+    "error: patch failed: hermes_cli/web_routers/profiles.py:54",
+    "error: hermes_cli/web_routers/profiles.py: patch does not apply"
+  ]
+}

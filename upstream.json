@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/NousResearch/hermes-agent.git",
+  "tag": "v2026.8.19",
+  "tagObjectSha": "b05e680e63d39d5a8e3ec0f5842a41d1c4209c03",
+  "commitSha": "fcbd1076a93841fa88855acce810e342a5b78101",
+  "packageVersion": "0.20.5",
+  "containerImage": "docker.io/nousresearch/hermes-agent",
+  "containerDigest": "sha256:3811ed13da874fba2ac99b6d492db9a203d34cb6dccf90d886948c00d0ccec09",
+  "backportVersion": 1
+}
