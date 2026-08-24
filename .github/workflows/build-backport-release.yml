@@ -90,7 +90,7 @@ jobs:
             --build-arg UPSTREAM_SOURCE_SHA='${{ steps.version.outputs.source_sha }}' \
             --build-arg BACKPORT_VERSION='${{ steps.version.outputs.backport }}' \
             -t 'hermes-agent:${{ steps.version.outputs.tag }}' .work/overlay
-          docker run --rm 'hermes-agent:${{ steps.version.outputs.tag }}' version
+          docker run --rm 'hermes-agent:${{ steps.version.outputs.tag }}' --version
           docker save 'hermes-agent:${{ steps.version.outputs.tag }}' | gzip -9 > \
             'dist/hermes-agent-${{ steps.version.outputs.tag }}-linux-amd64.docker.tar.gz'
 
