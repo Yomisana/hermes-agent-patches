@@ -49,6 +49,11 @@ class Result:
     issue: str
     ok: bool
     detail: str
+    # A probe that had nothing to observe. The session-scoping checks can only
+    # see a leak if sessions exist to leak; on a fresh deployment they would
+    # otherwise report PASS for the sole reason that both sides are empty,
+    # which is a green light that means nothing.
+    inconclusive: bool = False
 
 
 @dataclass
@@ -132,6 +137,25 @@ CROSS_PROFILE_GETS = (
 )
 
 
+def assert_authenticated(client: Client) -> None:
+    """Stop early if the server is refusing us, rather than blaming the patch.
+
+    A gated dashboard answers every probe with 401. Reading that as "the fix is
+    missing" is worse than useless — it sends someone hunting a patch bug that
+    is really a missing token. `hermes serve` mints an ephemeral token unless
+    HERMES_DASHBOARD_SESSION_TOKEN is set, so pass --token with whichever one
+    the deployment uses.
+    """
+    status, _ = client.get("/api/profiles")
+    if status == 401:
+        raise SystemExit(
+            "401 from /api/profiles: this dashboard requires authentication.\n"
+            "Pass --token <session token>. `hermes serve` generates one per run unless\n"
+            "HERMES_DASHBOARD_SESSION_TOKEN is set in the server's environment.\n"
+            "Nothing was verified."
+        )
+
+
 def check_isolated(client: Client, launch: str, other: str) -> list[Result]:
     results: list[Result] = []
     quoted_other = urllib.parse.quote(other)
@@ -169,20 +193,24 @@ def check_isolated(client: Client, launch: str, other: str) -> list[Result]:
         Result(
             "own profile still readable",
             "91330",
-            status != 403,
-            f"GET {own} -> {status}; must not be 403 (the fix must not lock out the launch profile)",
+            # Must be 200, not merely "not 403": any other refusal (401, 404)
+            # would otherwise pass this positive control for the wrong reason.
+            status == 200,
+            f"GET {own} -> {status}; expected 200 (the fix must not lock out the launch profile)",
         )
     )
 
     # --- #76932: profile=all must not fan out past the boundary --------------
     status, payload = client.get("/api/profiles/sessions?profile=all")
-    leaked = _session_profiles(payload) - {launch}
+    rows = _session_profiles(payload)
+    leaked = rows - {launch}
     results.append(
         Result(
             "profile=all does not cross the boundary",
             "76932",
             status == 200 and not leaked,
             f"GET /api/profiles/sessions?profile=all -> {status}; leaked profiles: {sorted(leaked) or 'none'}",
+            inconclusive=status == 200 and not rows,
         )
     )
 
@@ -190,13 +218,15 @@ def check_isolated(client: Client, launch: str, other: str) -> list[Result]:
     # On a profile-scoped process, 'default' must resolve to the launch profile
     # rather than the machine-root default profile.
     status, payload = client.get("/api/profiles/sessions?profile=default")
-    strayed = _session_profiles(payload) - {launch}
+    rows = _session_profiles(payload)
+    strayed = rows - {launch}
     results.append(
         Result(
             "profile=default resolves to the launch profile",
             "88897",
             status == 200 and not strayed,
             f"GET /api/profiles/sessions?profile=default -> {status}; foreign profiles: {sorted(strayed) or 'none'}",
+            inconclusive=status == 200 and not rows,
         )
     )
 
@@ -228,8 +258,8 @@ def check_machine(client: Client, launch: str, other: str) -> list[Result]:
         Result(
             "machine dashboard keeps cross-profile access",
             "91330",
-            status != 403,
-            f"GET {path} -> {status}; must not be 403 on a non-isolated server",
+            status == 200,
+            f"GET {path} -> {status}; expected 200 on a non-isolated server",
         )
     )
     return results
@@ -244,6 +274,11 @@ def main() -> None:
     parser.add_argument("--mode", choices=("isolated", "machine"), default="isolated")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     parser.add_argument(
+        "--allow-inconclusive",
+        action="store_true",
+        help="exit 0 even when a session-scoping check had no sessions to observe",
+    )
+    parser.add_argument(
         "--use-env-proxy",
         action="store_true",
         help="route probes through http_proxy/https_proxy (off by default; a corporate proxy rejects loopback)",
@@ -254,19 +289,34 @@ def main() -> None:
         raise SystemExit("--other-profile must differ from --launch-profile")
 
     client = Client(args.base_url, args.token, args.timeout, args.use_env_proxy)
+    assert_authenticated(client)
     checker = check_isolated if args.mode == "isolated" else check_machine
     results = checker(client, args.launch_profile, args.other_profile)
 
     failures = [item for item in results if not item.ok]
+    skipped = [item for item in results if item.ok and item.inconclusive]
     for item in results:
-        print(f"[{'PASS' if item.ok else 'FAIL'}] #{item.issue} {item.name}")
+        label = "FAIL" if not item.ok else ("SKIP" if item.inconclusive else "PASS")
+        print(f"[{label}] #{item.issue} {item.name}")
         if not item.ok:
             print(f"       {item.detail}")
+        elif item.inconclusive:
+            print("       no sessions existed to observe, so nothing was actually proven")
 
-    print(f"\n{len(results) - len(failures)}/{len(results)} checks passed ({args.mode} mode)")
+    passed = len(results) - len(failures) - len(skipped)
+    print(f"\n{passed}/{len(results)} checks passed ({args.mode} mode)", end="")
+    print(f", {len(skipped)} inconclusive" if skipped else "")
+
     if failures:
         print("The deployment does NOT carry the reviewed backports, or is misconfigured.")
         raise SystemExit(1)
+    if skipped and not args.allow_inconclusive:
+        print(
+            "\nSome checks had nothing to observe. Start at least one session in "
+            f"'{args.launch_profile}' and one in '{args.other_profile}', then re-run — "
+            "or pass --allow-inconclusive to accept an unproven result."
+        )
+        raise SystemExit(2)
     print("All reviewed backports are live in this deployment.")
 
 

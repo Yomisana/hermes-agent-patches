@@ -31,7 +31,7 @@ def _sessions(*profiles):
     return {"sessions": [{"id": f"s-{name}", "profile": name} for name in profiles]}
 
 
-def make_handler(patched: bool, isolated: bool):
+def make_handler(patched: bool, isolated: bool, empty_sessions: bool = False):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *_args):
             pass  # keep the unittest output readable
@@ -55,6 +55,8 @@ def make_handler(patched: bool, isolated: bool):
 
             if path == "/api/profiles/sessions":
                 which = (query.get("profile") or ["all"])[0]
+                if empty_sessions:
+                    return self._send(200, {"sessions": []})
                 if scoped:
                     # #76932 + #88897: never leaves the launch profile.
                     return self._send(200, _sessions(LAUNCH))
@@ -77,8 +79,8 @@ def make_handler(patched: bool, isolated: bool):
 
 
 class ServerFixture:
-    def __init__(self, patched: bool, isolated: bool = True):
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(patched, isolated))
+    def __init__(self, patched: bool, isolated: bool = True, empty_sessions: bool = False):
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(patched, isolated, empty_sessions))
         self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
         self.thread.start()
 
@@ -93,8 +95,8 @@ class ServerFixture:
 
 
 class VerifyDeploymentTests(unittest.TestCase):
-    def _run(self, patched, isolated=True, mode="isolated"):
-        server = ServerFixture(patched, isolated)
+    def _run(self, patched, isolated=True, mode="isolated", empty_sessions=False):
+        server = ServerFixture(patched, isolated, empty_sessions)
         self.addCleanup(server.close)
         client = VERIFY.Client(server.base_url)
         checker = VERIFY.check_isolated if mode == "isolated" else VERIFY.check_machine
@@ -125,6 +127,19 @@ class VerifyDeploymentTests(unittest.TestCase):
         own = [r for r in self._run(patched=True) if r.name == "own profile still readable"]
         self.assertEqual(len(own), 1)
         self.assertTrue(own[0].ok)
+
+    def test_session_checks_are_inconclusive_with_no_sessions(self):
+        # Reproduces what a fresh deployment does: with no sessions anywhere,
+        # "nothing leaked" is true of a vulnerable server too, so these two
+        # checks must not be counted as proof.
+        results = self._run(patched=True, empty_sessions=True)
+        inconclusive = {r.issue for r in results if r.inconclusive}
+        self.assertEqual(inconclusive, {"76932", "88897"})
+        # The endpoint-level checks still prove themselves either way.
+        self.assertTrue(all(r.ok for r in results))
+
+    def test_a_populated_server_leaves_nothing_inconclusive(self):
+        self.assertEqual([r for r in self._run(patched=True) if r.inconclusive], [])
 
     def test_probes_are_read_only(self):
         # Safe to point at a real deployment: nothing may mutate state.

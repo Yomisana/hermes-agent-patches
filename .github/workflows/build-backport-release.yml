@@ -57,6 +57,15 @@ jobs:
             https://github.com/NousResearch/hermes-agent.git .work/hermes-agent
           test "$(git -C .work/hermes-agent rev-parse HEAD)" = '${{ steps.version.outputs.source_sha }}'
 
+      # Fail before spending a build on a mismatch: upstream.json pins BOTH a
+      # source commit and a container digest, and nothing used to check that
+      # they describe the same upstream build. The official image records its
+      # own provenance at /opt/hermes/.hermes_build_sha.
+      - name: Verify the pinned image is the same upstream build as the source
+        env:
+          UPSTREAM_IMAGE: ${{ inputs.upstream_image }}
+        run: python scripts/patchctl.py verify-image "$UPSTREAM_IMAGE"
+
       - name: Apply reviewed patches with original authorship
         run: python scripts/patchctl.py apply .work/hermes-agent
 

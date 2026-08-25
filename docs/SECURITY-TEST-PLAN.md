@@ -54,5 +54,36 @@ python scripts/verify_deployment.py \
 
 `tests/test_verify_deployment.py` 對「未修補」與「已修補」兩種 stub server 各跑一次，確保這組檢查在未修補時**必定失敗**——否則綠燈不代表任何事。
 
+### 已實測結果（2026-08-25，本機 WSL + podman）
+
+對釘住的官方 image `sha256:3811ed13…` 與其 overlay 版本，各起一個 alice 的 isolated dashboard（同一份含 alice/bob 的 `/opt/data`）：
+
+| | 官方未補丁 | 已補丁 overlay |
+|---|---|---|
+| `GET /api/profiles` | `['default','alice','bob']` ❌ | `['alice']` ✅ |
+| `GET /api/profiles/bob/soul` | **200** ❌ | **403** ✅ |
+| `GET /api/profiles/bob/setup-command` | **200** ❌ | **403** ✅ |
+| `GET /api/profiles/bob/desktop-overlay` | **200** ❌ | **403** ✅ |
+| `GET /api/profiles/alice/soul` | 200 ✅ | 200 ✅ |
+| exit code | 1 | 0（無 session 時 2） |
+
+#76932 與 #91330 在釘住的基底上**已被實際重現**，並確認 overlay image 修正之。overlay image 內 4 個 runtime 檔案的 sha256 與補丁後原始碼完全相符；官方 image 內修正函式出現 0 次，overlay 內 16 次。
+
+### 空部署不會拿到假綠燈
+
+`profile=all` 與 `profile=default` 兩項檢查只有在**存在 session** 時才有意義——沒有 session 時「沒有洩漏」對未修補的伺服器也成立。腳本會把這兩項標成 `[SKIP]` 並以 exit code 2 結束，而不是報 PASS。要接受未證明的結果請加 `--allow-inconclusive`。
+
+### 認證
+
+Gated dashboard 會對每個 endpoint 回 401。腳本會在開始前偵測並直接中止，說明要帶 `--token`，而不是把 401 誤報成「沒有補丁」。`hermes serve` 每次啟動會產生臨時 token，除非在環境變數設 `HERMES_DASHBOARD_SESSION_TOKEN`。
+
+### 映像來源一致性
+
+```bash
+python scripts/patchctl.py verify-image <image@sha256:...>
+```
+
+比對 image 內 `/opt/hermes/.hermes_build_sha` 與 `upstream.json` 的 `commitSha`。`containerDigest` 若在 `commitSha` 沒跟著更新的情況下被換掉，補丁就會疊到不同版本的 image 上而其他檢查全部照樣通過——這一項就是擋這個。CI 在建置前會跑。
+
 注意：企業 proxy 會攔截 `http://127.0.0.1:...` 並回 `400 Request on loopback from external IP`，所以腳本預設直連、不走 `http_proxy`。要走 proxy 請加 `--use-env-proxy`。
 

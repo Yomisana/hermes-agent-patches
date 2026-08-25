@@ -132,6 +132,47 @@ def apply(checkout: Path, check_only: bool) -> None:
     print(f"applied {len(patch_paths)} reviewed patch mbox file(s); recorded {len(commits)} commit(s)")
 
 
+def verify_image(image: str, runtime: str) -> None:
+    """Assert the pinned container image is the SAME upstream build as the source.
+
+    ``upstream.json`` pins a source commit AND a container digest, but nothing
+    checked that they agree. If ``containerDigest`` is ever refreshed without
+    ``commitSha`` (or the reverse), the overlay silently lands patches built
+    for one upstream revision on top of an image built from another, and every
+    other check in this repo still passes.
+
+    The official image records its own provenance at
+    ``/opt/hermes/.hermes_build_sha``; that is the authority we compare against.
+    """
+    upstream = load_json(UPSTREAM)
+    expected_sha = upstream["commitSha"]
+    expected_digest = upstream.get("containerDigest")
+
+    if expected_digest and "@sha256:" in image and not image.endswith(expected_digest):
+        raise SystemExit(
+            f"image digest does not match upstream.json containerDigest\n"
+            f"  image:        {image}\n"
+            f"  upstream.json: {expected_digest}"
+        )
+
+    probe = subprocess.run(
+        [runtime, "run", "--rm", "--entrypoint", "cat", image, "/opt/hermes/.hermes_build_sha"],
+        capture_output=True,
+        text=True,
+    )
+    if probe.returncode != 0:
+        raise SystemExit(f"could not read /opt/hermes/.hermes_build_sha from {image}: {probe.stderr.strip()}")
+
+    actual_sha = probe.stdout.strip()
+    if actual_sha != expected_sha:
+        raise SystemExit(
+            f"image was built from a DIFFERENT upstream commit than the patches target\n"
+            f"  image .hermes_build_sha: {actual_sha}\n"
+            f"  upstream.json commitSha: {expected_sha}"
+        )
+    print(f"image provenance matches upstream.json ({actual_sha})")
+
+
 def reverse(checkout: Path) -> None:
     validate_metadata(require_enabled=True)
     if run(["git", "status", "--porcelain"], checkout, True):
@@ -159,10 +200,15 @@ def main() -> None:
     for name in ("check", "apply", "reverse"):
         p = sub.add_parser(name)
         p.add_argument("checkout", type=Path)
+    image_parser = sub.add_parser("verify-image")
+    image_parser.add_argument("image", help="image ref, ideally pinned by @sha256: digest")
+    image_parser.add_argument("--runtime", default="docker", choices=("docker", "podman"))
     args = parser.parse_args()
     if args.command == "validate":
         patches = validate_metadata()
         print(f"manifest valid; {len(patches)} patch(es) enabled")
+    elif args.command == "verify-image":
+        verify_image(args.image, args.runtime)
     elif args.command == "check":
         apply(args.checkout.resolve(), True)
     elif args.command == "apply":
