@@ -67,6 +67,18 @@ python scripts/verify_deployment.py \
 | `GET /api/profiles/alice/soul` | 200 ✅ | 200 ✅ |
 | exit code | 1 | 0（無 session 時 2） |
 
+再以同一份資料起**非 isolated 的 machine dashboard**（`HERMES_HOME=/opt/data`，不加 `--isolated`），確認第 3 點「合法情境未被破壞」：
+
+| `--mode machine` | 官方未補丁 | 已補丁 overlay |
+|---|---|---|
+| `/api/profiles` 列出所有 profile | ✅ | ✅ |
+| `GET /api/profiles/bob/soul` | 200 ✅ | 200 ✅ |
+| exit code | 0 | 0 |
+
+兩者行為**完全一致**——補丁沒有把官方的跨 profile 管理能力封掉。
+
+⚠️ machine 模式是「沒有過度封鎖」的對照組，**未補丁的伺服器同樣會通過**，所以它不能當成補丁存在的證據。腳本在這個模式下的結論會明講這一點；要證明補丁存在請用 `--mode isolated`。
+
 #76932 與 #91330 在釘住的基底上**已被實際重現**，並確認 overlay image 修正之。overlay image 內 4 個 runtime 檔案的 sha256 與補丁後原始碼完全相符；官方 image 內修正函式出現 0 次，overlay 內 16 次。
 
 ### 空部署不會拿到假綠燈

@@ -141,6 +141,13 @@ class VerifyDeploymentTests(unittest.TestCase):
     def test_a_populated_server_leaves_nothing_inconclusive(self):
         self.assertEqual([r for r in self._run(patched=True) if r.inconclusive], [])
 
+    def test_machine_mode_passes_on_an_unpatched_server_too(self):
+        # Machine mode is a no-over-blocking control, not evidence of the fix:
+        # an unpatched server passes it by definition. Pinned so nobody later
+        # reads a green machine-mode run as proof the backports are present.
+        results = self._run(patched=False, isolated=False, mode="machine")
+        self.assertTrue(all(r.ok for r in results))
+
     def test_probes_are_read_only(self):
         # Safe to point at a real deployment: nothing may mutate state.
         server = ServerFixture(patched=True)

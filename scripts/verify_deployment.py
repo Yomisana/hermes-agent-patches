@@ -317,7 +317,18 @@ def main() -> None:
             "or pass --allow-inconclusive to accept an unproven result."
         )
         raise SystemExit(2)
-    print("All reviewed backports are live in this deployment.")
+
+    # Mode-aware verdict. Machine mode only proves the patches did not
+    # over-block official cross-profile management — an UNPATCHED server
+    # passes it too, by definition. Claiming "the backports are live" there
+    # would be exactly backwards.
+    if args.mode == "machine":
+        print(
+            "Official cross-profile management is intact — the backports did not over-block it.\n"
+            "This mode cannot show whether the backports are present; use --mode isolated for that."
+        )
+    else:
+        print("All reviewed backports are live in this deployment.")
 
 
 if __name__ == "__main__":
