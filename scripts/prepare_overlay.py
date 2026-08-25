@@ -11,6 +11,13 @@ from pathlib import Path
 
 UNSAFE_PREFIXES = ("pyproject.toml", "uv.lock", "package.json", "package-lock.json", "web/", "ui-tui/", "apps/shared/", "Dockerfile", "docker/")
 
+# The official image excludes tests/ (upstream .dockerignore) and does not ship
+# pytest (it lives in the `dev` extra only), so copying test files in would add
+# a directory the official image deliberately lacks without making anything
+# runnable. Regression tests are proven against the source checkout in CI; the
+# image is proven by scripts/verify_deployment.py over HTTP.
+IMAGE_IRRELEVANT_PREFIXES = ("tests/", "contributors/")
+
 
 def run(args: list[str], cwd: Path) -> str:
     if args and args[0] == "git":
@@ -25,7 +32,7 @@ def main() -> None:
     parser.add_argument("--base-sha", required=True)
     args = parser.parse_args()
     checkout, output = args.checkout.resolve(), args.output.resolve()
-    changes = []
+    changes, skipped = [], []
     for line in run(["git", "diff", "--name-status", f"{args.base_sha}..HEAD"], checkout).splitlines():
         if not line:
             continue
@@ -35,12 +42,15 @@ def main() -> None:
         normalized = name.replace("\\", "/")
         if normalized.startswith(UNSAFE_PREFIXES):
             raise SystemExit(f"{name} requires a full official Dockerfile rebuild, not a fast overlay")
+        if normalized.startswith(IMAGE_IRRELEVANT_PREFIXES):
+            skipped.append(normalized)
+            continue
         source = checkout / name
         if not source.is_file():
             raise SystemExit(f"changed path is not a regular file: {name}")
         changes.append(normalized)
     if not changes:
-        raise SystemExit("patch set produced no changed files")
+        raise SystemExit("patch set produced no runtime file changes for the image overlay")
     if output.exists():
         shutil.rmtree(output)
     rootfs = output / "rootfs" / "opt" / "hermes"
@@ -50,6 +60,8 @@ def main() -> None:
         shutil.copy2(checkout / name, destination)
     (output / "overlay-files.json").write_text(json.dumps(changes, indent=2) + "\n", encoding="utf-8")
     print(f"prepared {len(changes)} file(s) under {rootfs}")
+    if skipped:
+        print(f"skipped {len(skipped)} non-runtime file(s) the official image does not ship: {', '.join(skipped)}")
 
 
 if __name__ == "__main__":

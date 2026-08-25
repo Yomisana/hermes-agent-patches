@@ -101,6 +101,28 @@ python scripts/patchctl.py reverse /path/to/hermes-agent
 
 `reverse` only accepts commits recorded by the preceding `apply`, with no later change to `HEAD`.
 
+## Verify the fixes are actually live
+
+Starting successfully does not prove the backports are present. Run the same
+read-only HTTP checks against whatever you deployed — container or not — with a
+profile-scoped server running and at least two profiles on the machine:
+
+```bash
+python scripts/verify_deployment.py \
+    --base-url http://127.0.0.1:8642 \
+    --launch-profile alice --other-profile bob
+```
+
+Every probe is a GET, so this is safe against a real deployment. Exit status 0
+means all three backports are live; any failure prints the endpoint, the status
+it returned, and the status expected. Add `--token` when the server is
+auth-gated, and `--mode machine` against a non-isolated dashboard to confirm
+official cross-profile management still works.
+
+If the server is on this machine and the checks fail to connect at all, note
+that `http_proxy` will capture loopback traffic on a corporate network; the
+script bypasses proxies by default, and `--use-env-proxy` opts back in.
+
 ## Verification scope
 
 Confirm that the CLI or image starts, existing configuration can be read, profiles cannot read each other's sessions, an isolated desktop cannot operate on another profile or machine-wide profile endpoints, and `profile=default` remains routed to the launch profile when scoped.

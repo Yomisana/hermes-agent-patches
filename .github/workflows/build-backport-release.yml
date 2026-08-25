@@ -91,6 +91,32 @@ jobs:
             --build-arg BACKPORT_VERSION='${{ steps.version.outputs.backport }}' \
             -t 'hermes-agent:${{ steps.version.outputs.tag }}' .work/overlay
           docker run --rm 'hermes-agent:${{ steps.version.outputs.tag }}' --version
+
+          # `--version` only proves the image boots. Prove the overlay actually
+          # LANDED: every patched runtime file inside the image must be
+          # byte-identical to the patched source. Without this a silently
+          # mis-targeted COPY ships an unpatched image under a backport tag.
+          python - <<'PY'
+          import hashlib, json, pathlib, subprocess, sys
+          image = 'hermes-agent:${{ steps.version.outputs.tag }}'
+          files = json.loads(pathlib.Path('.work/overlay/overlay-files.json').read_text())
+          bad = []
+          for name in files:
+              expected = hashlib.sha256(pathlib.Path('.work/hermes-agent', name).read_bytes()).hexdigest()
+              got = subprocess.run(
+                  ['docker', 'run', '--rm', '--entrypoint', 'sha256sum', image, f'/opt/hermes/{name}'],
+                  capture_output=True, text=True,
+              )
+              actual = got.stdout.split()[0] if got.returncode == 0 and got.stdout.split() else f'ERROR: {got.stderr.strip()}'
+              print(('ok   ' if actual == expected else 'BAD  ') + name)
+              if actual != expected:
+                  bad.append((name, expected, actual))
+          if bad:
+              for name, expected, actual in bad:
+                  print(f'{name}: expected {expected}, image has {actual}', file=sys.stderr)
+              sys.exit('overlay did not reach the image; refusing to publish an unpatched backport')
+          print(f'all {len(files)} patched runtime file(s) verified inside the image')
+          PY
           # Docker layer blobs are already compressed; level 1 avoids spending
           # several CI minutes for negligible additional size reduction.
           docker save 'hermes-agent:${{ steps.version.outputs.tag }}' | gzip -1 > \
