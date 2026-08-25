@@ -81,6 +81,53 @@ python scripts/verify_deployment.py \
 
 #76932 與 #91330 在釘住的基底上**已被實際重現**，並確認 overlay image 修正之。overlay image 內 4 個 runtime 檔案的 sha256 與補丁後原始碼完全相符；官方 image 內修正函式出現 0 次，overlay 內 16 次。
 
+### #91330 的寫入路徑（issue 原文的重現步驟）
+
+`verify_deployment.py` 刻意只發 GET，因為它要能安全地對正式部署執行。但 #91330 報的是**編輯**另一個 profile 的 SOUL.md，所以寫入路徑必須手動驗證一次，且只能在拋棄式環境做。
+
+從 alice 的 isolated dashboard 對 bob 發 PUT：
+
+```bash
+curl -X PUT -H 'Content-Type: application/json' \
+  -H "X-Hermes-Session-Token: $TOKEN" \
+  -d '{"content":"INJECTED"}' \
+  http://127.0.0.1:9119/api/profiles/bob/soul
+# 再依 issue 的步驟檢查磁碟上的檔案
+sha256sum /opt/data/profiles/bob/SOUL.md
+```
+
+實測結果（2026-08-25）：
+
+| | 官方未補丁 | 已補丁 overlay |
+|---|---|---|
+| `PUT /api/profiles/bob/soul` | **200** | **403** |
+| `/opt/data/profiles/bob/SOUL.md` | 內容被覆寫為 `INJECTED`，sha 改變 ❌ | sha 不變，內容完好 ✅ |
+| `PUT /api/profiles/alice/soul`（自己） | — | **200** ✅ |
+
+403 的回應內容正是 #91381 的訊息：
+
+```json
+{"detail":"This dashboard is isolated to profile 'alice'. Refusing to access another profile ('bob')."}
+```
+
+也就是說 **#91330 描述的「透過 isolated dashboard 編輯他人 SOUL.md」在釘住的官方 base 上完全成立，補丁後被擋下，且合法的自我編輯不受影響。**
+
+### 403 與 401 是兩件事
+
+`#91381` 的隔離邊界一律回 **403**（其實作與自帶測試皆然，整份 patch 出現 `401` 的次數是 **0**）。
+
+**401 來自上游既有的 dashboard auth gate**（`hermes_cli/web_server.py` 的 `raise HTTPException(status_code=401, detail="Unauthorized")`），未補丁的官方版本同樣會回。沒有帶 token 時每個 endpoint 都是 401，看不到 403。
+
+同一台已補丁的伺服器、同一個 endpoint：
+
+| 請求 | 狀態碼 |
+|---|---|
+| 無 token | **401**（auth gate） |
+| 帶正確 token，跨 profile | **403**（#91381 的隔離邊界） |
+| 帶正確 token，自己的 profile | **200** |
+
+所以「補丁回 401 而不是 403」是**沒有帶 token** 的症狀，不是補丁不符。腳本會在開頭偵測 401 並直接中止，就是為了避免這個誤判。
+
 ### 空部署不會拿到假綠燈
 
 `profile=all` 與 `profile=default` 兩項檢查只有在**存在 session** 時才有意義——沒有 session 時「沒有洩漏」對未修補的伺服器也成立。腳本會把這兩項標成 `[SKIP]` 並以 exit code 2 結束，而不是報 PASS。要接受未證明的結果請加 `--allow-inconclusive`。
